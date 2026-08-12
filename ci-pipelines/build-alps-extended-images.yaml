@@ -56,6 +56,7 @@ variables:
   - NAME: "sfttrainer"
   - NAME: "verl"
   - NAME: "vllm"
+  - NAME: "nemorl"
 
 .rocm_app_images_matrix: &rocm_app_images_matrix
   - NAME: "vllm"
