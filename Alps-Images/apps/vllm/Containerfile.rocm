@@ -103,9 +103,11 @@ RUN set -eux; \
     rm -rf /tmp/vllm-apt-before.txt /root/.cache/pip
 
 RUN set -eux; \
-    python -c 'import torch, vllm; print("torch={} hip={}".format(torch.__version__, torch.version.hip)); print("vllm={}".format(getattr(vllm, "__version__", "unknown")))'; \
+    python -c 'import torch; print("torch={} hip={}".format(torch.__version__, torch.version.hip))'; \
     python -m pip check || echo "WARN: inconsistent pip dependency resolution (see above)"; \
-    missing="$(find "$(python -c 'import vllm; print(vllm.__path__[0])')" -name '*.so' \
+    vllm_dir="$(python -c 'import importlib.util; print(importlib.util.find_spec("vllm").submodule_search_locations[0])')"; \
+    test -n "${vllm_dir}"; \
+    missing="$(find "${vllm_dir}" -name '*.so' \
                  -exec ldd {} + 2>/dev/null | grep 'not found' || true)"; \
     if [ -n "${missing}" ]; then \
       echo "FATAL: vLLM native extensions have unresolved dependencies:" >&2; \
