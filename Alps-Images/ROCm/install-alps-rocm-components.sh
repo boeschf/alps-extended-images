@@ -259,6 +259,7 @@ PY
         printf '    "librocm_sysdeps_nl_3.so.200",\n'
         printf '    "librocm_sysdeps_mnl.so.0",\n'
         printf '    "librocm_sysdeps_nl_genl_3.so.200",\n'
+        printf '    "librocm_sysdeps_drm_amdgpu.so.1",\n'
         printf ')\n\n'
         printf 'def preload_amdsmi_dependencies():\n'
         printf '    for name in _REQUIRED:\n'
