@@ -175,8 +175,9 @@ PY
 }
 
 link_amdsmi_package_library() {
-    local amdsmi_pkg_dir amdsmi_lib="" amdsmi_sysdeps_root="" wrapper preload_file
-    local candidate lib prefix sysdeps_dir sysdeps_fallbacks=() sysdeps_dirs=() candidates=() ordered=()
+    local amdsmi_pkg_dir amdsmi_lib="" amdsmi_sysdeps_root="" wrapper preload_file needed
+    local candidate lib prefix sysdeps_dir name
+    local -a sysdeps_fallbacks=() sysdeps_dirs=() candidates=() ordered=() preload_names=()
 
     amdsmi_pkg_dir="$(${ROCM_PYTHON} - <<'PY'
 import importlib.util
@@ -215,7 +216,6 @@ PY
         candidates=("${ordered[@]}")
     fi
 
-    local -a sysdeps_fallbacks=()
     while IFS= read -r candidate; do
         [[ -n "${candidate}" ]] || continue
         lib="$(find "${candidate}" -maxdepth 2 \
@@ -246,9 +246,31 @@ PY
 
     ln -sf "${amdsmi_lib}" "${amdsmi_pkg_dir}/libamd_smi.so"
 
+    # Derive the preload list from the ELF NEEDED entries of the selected
+    # libamd_smi.so plus the DRM library it dlopens without a NEEDED entry
+    # (used for amdgpu_device_initialize paths such as VRAM-usage queries), so
+    # SONAME bumps in future ROCm releases are followed automatically.
+    needed="$(readelf -d "${amdsmi_lib}" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | grep '^librocm_sysdeps_' || true)"
+    [[ -n "${needed}" ]] || die "no rocm_sysdeps NEEDED entries found in ${amdsmi_lib}"
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        case " ${preload_names[*]:-} " in
+            *" ${name} "*) ;;
+            *) preload_names+=("${name}") ;;
+        esac
+    done <<<"${needed}"
+    # dlopen-only dependency: not in NEEDED; required for DRM-backed queries
+    # and to keep libamd_smi's opportunistic loader from warning per process.
+    [[ " ${preload_names[*]} " == *" librocm_sysdeps_drm_amdgpu.so.1 "* ]] \
+        || preload_names+=("librocm_sysdeps_drm_amdgpu.so.1")
+    if ! find "${sysdeps_dirs[@]}" -maxdepth 1 -name 'librocm_sysdeps_drm_amdgpu.so*' -print -quit 2>/dev/null | grep -q .; then
+        echo "WARNING: no librocm_sysdeps_drm_amdgpu.so* found in sysdeps dirs; DRM-backed amdsmi queries will degrade" >&2
+    fi
+
     preload_file="${amdsmi_pkg_dir}/_alps_amdsmi_preload.py"
     {
         printf 'import ctypes\n'
+        printf 'import sys\n'
         printf 'from pathlib import Path\n\n'
         printf '_SYSDEPS_DIRS = (\n'
         for sysdeps_dir in "${sysdeps_dirs[@]}"; do
@@ -256,10 +278,9 @@ PY
         done
         printf ')\n'
         printf '_REQUIRED = (\n'
-        printf '    "librocm_sysdeps_nl_3.so.200",\n'
-        printf '    "librocm_sysdeps_mnl.so.0",\n'
-        printf '    "librocm_sysdeps_nl_genl_3.so.200",\n'
-        printf '    "librocm_sysdeps_drm_amdgpu.so.1",\n'
+        for name in "${preload_names[@]}"; do
+            printf '    "%s",\n' "${name}"
+        done
         printf ')\n\n'
         printf 'def preload_amdsmi_dependencies():\n'
         printf '    for name in _REQUIRED:\n'
@@ -268,6 +289,8 @@ PY
         printf '            if path.exists():\n'
         printf '                ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)\n'
         printf '                break\n'
+        printf '        else:\n'
+        printf '            print(f"WARNING: amdsmi preload: {name} not found in any of {_SYSDEPS_DIRS}", file=sys.stderr)\n'
     } > "${preload_file}"
 
     wrapper="${amdsmi_pkg_dir}/amdsmi_wrapper.py"
@@ -315,11 +338,15 @@ else:
 
 text = path.read_text()
 patched = """        else:
+            # Alps: block the implicit amdsmi import. Loading amdsmi here maps
+            # a second copy of libamd_smi's sysdeps (libnl) next to the copy
+            # the ROCm runtime stack loads via RPATH, corrupting libnl state
+            # and segfaulting at exit. The amdsmi package remains importable
+            # directly; vLLM's platform probe loads it explicitly and safely
+            # because its preload maps the core-SDK copies first.
             raise ModuleNotFoundError(
                 "amdsmi auto-import disabled in Alps ROCm images"
             )
-            import ctypes
-            from pathlib import Path
 """
 if patched in text:
     print(f"PyTorch ROCm amdsmi auto-import already disabled: {path}")
@@ -365,7 +392,8 @@ persist_rocm_sdk_env() {
 }
 
 rocm_sdk_prefix_candidates() {
-    local candidate seen=""
+    local candidate
+    local -A emitted=()
 
     for candidate in \
         "${ROCM_BUILD_PREFIX:-}" \
@@ -377,13 +405,9 @@ rocm_sdk_prefix_candidates() {
         "${ROCM_CORE_DIR:-}/_rocm_sdk_core" \
         "${ROCM_LIBRARIES_DIR:-}/_rocm_sdk_libraries"; do
         [[ -n "${candidate}" ]] || continue
-        case " ${seen} " in
-            *" ${candidate} "*) ;;
-            *)
-                seen+=" ${candidate}"
-                printf '%s\n' "${candidate}"
-                ;;
-        esac
+        [[ -n "${emitted[${candidate}]:-}" ]] && continue
+        emitted["${candidate}"]=1
+        printf '%s\n' "${candidate}"
     done
 }
 
