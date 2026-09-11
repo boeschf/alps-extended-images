@@ -175,8 +175,8 @@ PY
 }
 
 link_amdsmi_package_library() {
-    local amdsmi_pkg_dir amdsmi_lib="" wrapper preload_file
-    local candidate lib sysdeps_dir sysdeps_dirs=()
+    local amdsmi_pkg_dir amdsmi_lib="" amdsmi_sysdeps_root="" wrapper preload_file
+    local candidate lib prefix sysdeps_dir sysdeps_fallbacks=() sysdeps_dirs=() candidates=() ordered=()
 
     amdsmi_pkg_dir="$(${ROCM_PYTHON} - <<'PY'
 import importlib.util
@@ -189,21 +189,60 @@ PY
 )"
     [[ -d "${amdsmi_pkg_dir}" ]] || die "amdsmi package directory not found: ${amdsmi_pkg_dir}"
 
+    # The ROCm runtime stack (librccl, libamdhip64 consumers) resolves
+    # libamd_smi.so.26 through RPATHs that point into the ROCm core SDK
+    # (e.g. $ORIGIN/../../_rocm_sdk_core/lib), so that is the copy mapped
+    # into any process that imports torch. The amdsmi Python package must
+    # load the same file: loading the byte-identical devel copy from a
+    # different inode maps the same SONAME twice (ODR violation), which
+    # corrupts libnl global state and segfaults at process exit once both
+    # torch and amdsmi are imported (vLLM imports both). Prefer the core
+    # prefix, then libraries, then the remaining candidates.
+
+    while IFS= read -r prefix; do
+        [[ -n "${prefix}" ]] || continue
+        candidates+=("${prefix}")
+    done < <(rocm_sdk_prefix_candidates)
+    if [[ -n "${ROCM_CORE_PREFIX:-}" ]]; then
+        ordered+=("${ROCM_CORE_PREFIX}")
+        [[ -n "${ROCM_LIBRARIES_PREFIX:-}" ]] && ordered+=("${ROCM_LIBRARIES_PREFIX}")
+        for prefix in "${candidates[@]}"; do
+            case " ${ordered[*]} " in
+                *" ${prefix} "*) ;;
+                *) ordered+=("${prefix}") ;;
+            esac
+        done
+        candidates=("${ordered[@]}")
+    fi
+
+    local -a sysdeps_fallbacks=()
     while IFS= read -r candidate; do
         [[ -n "${candidate}" ]] || continue
         lib="$(find "${candidate}" -maxdepth 2 \
             \( -type f -o -type l \) -name 'libamd_smi.so*' -print -quit 2>/dev/null || true)"
         if [[ -n "${lib}" && -z "${amdsmi_lib}" ]]; then
             amdsmi_lib="${lib}"
+            amdsmi_sysdeps_root="${candidate}"
         fi
         for sysdeps_dir in "${candidate}/lib/rocm_sysdeps/lib" "${candidate}/lib64/rocm_sysdeps/lib"; do
             [[ -d "${sysdeps_dir}" ]] || continue
             compgen -G "${sysdeps_dir}/librocm_sysdeps_*.so*" >/dev/null || continue
-            sysdeps_dirs+=("${sysdeps_dir}")
+            case " ${sysdeps_fallbacks[*]} " in
+                *" ${sysdeps_dir} "*) ;;
+                *) sysdeps_fallbacks+=("${sysdeps_dir}") ;;
+            esac
+            # Collect sysdeps directories that match the selected library's
+            # root first, so the preload maps the same files the RPATH of
+            # libamd_smi.so resolves to. Other prefixes stay as fallbacks.
+            if [[ "${candidate}" == "${amdsmi_sysdeps_root}" ]]; then
+                sysdeps_dirs+=("${sysdeps_dir}")
+            fi
         done
-    done < <(rocm_sdk_prefix_candidates)
+    done < <(printf '%s\n' "${candidates[@]}")
+    if [[ "${#sysdeps_dirs[@]}" -eq 0 ]]; then
+        sysdeps_dirs=("${sysdeps_fallbacks[@]}")
+    fi
     [[ -n "${amdsmi_lib}" ]] || die "libamd_smi.so* not found after installing amdsmi"
-    [[ "${#sysdeps_dirs[@]}" -gt 0 ]] || die "ROCm sysdeps libraries not found for amdsmi"
 
     ln -sf "${amdsmi_lib}" "${amdsmi_pkg_dir}/libamd_smi.so"
 
