@@ -20,7 +20,7 @@ LABEL org.opencontainers.image.source="${OCI_SOURCE}" \
       com.cscs.alps.git.commit_short="${CSCS_ALPS_GIT_COMMIT_SHORT}"
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_REF="v0.27.1"
+ARG VLLM_REF="v0.29.0"
 ARG VLLM_TARGET_DEVICE="rocm"
 ARG PYTORCH_ROCM_ARCH="gfx942"
 ARG MAX_JOBS="32"
@@ -31,6 +31,8 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}"
 
 COPY Alps-Images/common/package-helpers.sh /opt/alps/package-helpers.sh
+
+COPY Alps-Images/apps/vllm/patches/ /opt/alps-vllm-patches/
 
 RUN set -eux; \
     source /opt/alps/package-helpers.sh; \
@@ -67,7 +69,7 @@ RUN set -eux; \
       done < <(find "${rocm_root}" -type f -name 'librocm-openblas.so*' -printf '%h\n' | sort -u); \
     done; \
     sort -u "${rocm_ldconfig_file}" -o "${rocm_ldconfig_file}"; \
-    export ROCM_PATH="${ROCM_BUILD_PREFIX}" HIP_PATH="${ROCM_BUILD_PREFIX}"; \
+    export ROCM_HOME="${ROCM_BUILD_PREFIX}" ROCM_PATH="${ROCM_BUILD_PREFIX}" HIP_PATH="${ROCM_BUILD_PREFIX}"; \
     export PATH="${ROCM_BUILD_PREFIX}/bin:${ROCM_BUILD_PREFIX}/llvm/bin:${PATH}"; \
     rocm_libdir="${ROCM_BUILD_PREFIX}/lib64"; \
     test -d "${rocm_libdir}" || rocm_libdir="${ROCM_BUILD_PREFIX}/lib"; \
@@ -89,9 +91,19 @@ RUN set -eux; \
     cd /opt/vllm; \
     git checkout -q "${VLLM_REF}"; \
     git submodule update --init --recursive; \
-    python use_existing_torch.py --prefix || python use_existing_torch.py; \
+    shopt -s nullglob; vllm_patch_files=(/opt/alps-vllm-patches/*.patch); shopt -u nullglob; \
+    for patch_file in "${vllm_patch_files[@]}"; do \
+      echo "Applying vLLM patch: ${patch_file}"; \
+      git apply --check "${patch_file}"; \
+      git apply "${patch_file}"; \
+    done; \
     pip_install python --no-cache-dir -r requirements/rocm.txt; \
-    python setup.py develop; \
+    # clang 23 in the ROCm 10 wheel SDK treats any ROCM_PATH/HIP_PATH env var as an
+    # explicit --rocm-path and then mis-detects the HIP language (__host__ rejected in
+    # -x hip compiles), so the build drops both. ROCM_HOME is kept: torch uses it to
+    # pass -DROCM_PATH to the cmake configure so enable_language(HIP) finds the
+    # hip-lang package in the Alps compat layout at /opt/rocm.
+    env -u ROCM_PATH -u HIP_PATH python setup.py develop; \
     pip_install python --no-cache-dir "ray[default]" sentencepiece tiktoken; \
     torch_lib_dir="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"; \
     test -d "${torch_lib_dir}"; \
