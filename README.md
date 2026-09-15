@@ -51,6 +51,8 @@ Application images are built on top of accelerator-specific base images and incl
 | `vllm-cuda:alps7-dev`        | `pytorch-cuda:26.07-py3` | vLLM serving workloads built from source (v0.29.0, Torch 2.13 stable-libtorch APIs) |
 | `vllm-rocm:alps7-dev`        | `pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13` | vLLM serving workloads built from source for ROCm/MI300 (v0.29.0) |
 
+## HPC Stack Components
+
 The base installers use shared defaults from `common/alps-stack-versions.env`, shared build primitives from `common/install-alps-hpc-stack.sh`, plus family-specific wrappers from `NGC/` or `ROCm/`. They purge preinstalled generic network-stack packages/files where appropriate, then build and install the following libraries. Shared primitives export `LIBFABRIC_PREFIX`, `UCX_PREFIX`, `UCC_PREFIX`, `OMPI_PREFIX`, and `HWLOC_PREFIX`; shared aws-ofi plugin logic is configured by the family wrappers with CUDA or ROCm support.
 
 | Component | Version | Purpose |

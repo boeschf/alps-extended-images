@@ -115,8 +115,11 @@ RUN set -eux; \
 RUN set -eux; \
     python -c 'import torch; print("torch={} hip={}".format(torch.__version__, torch.version.hip))'; \
     python -m pip check || echo "WARN: inconsistent pip dependency resolution (see above)"; \
-    vllm_dir="$(python -c 'import importlib.util; print(importlib.util.find_spec("vllm").submodule_search_locations[0])')"; \
-    test -n "${vllm_dir}"; \
+    vllm_dir="$(python -c 'import importlib.util; spec = importlib.util.find_spec("vllm"); print(spec.submodule_search_locations[0] if spec else "")')"; \
+    if [ -z "${vllm_dir}" ]; then \
+      echo "FATAL: vllm is not importable by the runtime python" >&2; \
+      exit 1; \
+    fi; \
     missing="$(find "${vllm_dir}" -name '*.so' \
                  -exec ldd {} + 2>/dev/null | grep 'not found' || true)"; \
     if [ -n "${missing}" ]; then \

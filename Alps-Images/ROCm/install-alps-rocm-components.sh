@@ -134,12 +134,13 @@ RCCLCFG
     fi
 }
 
-# The wheel-only SDK layout has no devel payload: no CMake package configs and no
-# succeed for a fixed set of packages (amd_comgr, rocrand, hiprand, rocblas, hipblas,
-# miopen, hipfft, hipsparse, rocprim, hipcub, rocthrust, hipsolver, rocsolver, hiprtc), so
-# extension builds like vLLM's cannot configure. Generate the missing package
-# configs and install the public headers from the pinned rocm-libraries source tree
-# (same therock tag family as ROCM_SYSTEMS_COMMIT).
+# The wheel-only SDK layout has no devel payload: no CMake package configs, so
+# find_package() calls for a fixed set of packages (amd_comgr, rocrand, hiprand,
+# rocblas, hipblas, miopen, hipfft, hipsparse, rocprim, hipcub, rocthrust,
+# hipsolver, rocsolver, hiprtc) fail and extension builds like vLLM's cannot
+# configure. Generate the missing package configs and install the public
+# headers from the pinned rocm-libraries source tree (same therock tag family
+# as ROCM_SYSTEMS_COMMIT).
 generate_rocm_devel_compat() {
     [[ -n "${ROCM_LIBRARIES_REPO:-}" ]] || die "generate_rocm_devel_compat requires ROCM_LIBRARIES_REPO"
     [[ -n "${ROCM_LIBRARIES_COMMIT:-}" ]] || die "generate_rocm_devel_compat requires ROCM_LIBRARIES_COMMIT"
@@ -217,7 +218,6 @@ HIPBLASEXPORT
 #ifndef HIPBLAS_VERSION_H
 #define HIPBLAS_VERSION_H
 #define hipblasVersionMajor 3
-#define hipblaseVersionMinor 5
 #define hipblasVersionMinor 5
 #define hipblasVersionPatch 0
 #define hipblasVersionTweak 0
@@ -309,7 +309,7 @@ ROCRANDVERSION
 HIPRANDVERSION
 
     # Generated headers the hipsparse/hipsolver packages normally ship from templates.
-    cat > "${root}/include/hipsparse/hipsparse-export.h" <<'HIPSPARSELTEXPORT'
+    cat > "${root}/include/hipsparse/hipsparse-export.h" <<'HIPSPARSEEXPORT'
 #ifndef HIPSPARSE_EXPORT_H
 #define HIPSPARSE_EXPORT_H
 #ifndef HIPSPARSE_EXPORT
@@ -319,15 +319,15 @@ HIPRANDVERSION
 #define HIPSPARSE_NO_EXPORT __attribute__((visibility("hidden")))
 #endif
 #endif
-HIPSPARSELTEXPORT
-    cat > "${root}/include/hipsparse/hipsparse-version.h" <<'HIPSPARSELTLTVERSION'
+HIPSPARSEEXPORT
+    cat > "${root}/include/hipsparse/hipsparse-version.h" <<'HIPSPARSEVERSION'
 #ifndef HIPSPARSE_VERSION_H
 #define HIPSPARSE_VERSION_H
 #define hipsparseVersionMajor 4
 #define hipsparseVersionMinor 6
 #define hipsparseVersionPatch 0
 #endif
-HIPSPARSELTLTVERSION
+HIPSPARSEVERSION
     cat > "${root}/include/hipsolver/internal/hipsolver-version.h" <<'HIPSOLVERVERSION'
 #ifndef HIPSOLVER_VERSION_H
 #define HIPSOLVER_VERSION_H
@@ -456,8 +456,10 @@ bootstrap_rocm_sdk() {
     local -a sdk_packages=()
     local pkg have
     for pkg in "rocm==${ROCM_VERSION}" "rocm-sdk-core==${ROCM_VERSION}" "rocm-sdk-libraries==${ROCM_VERSION}"; do
-        have="$("${ROCM_PYTHON}" -c "import importlib.util, sys; spec = importlib.util.find_spec(\"${pkg%%==*}\"); sys.exit(0 if spec else 1)" && echo yes || echo no)"
-        if [[ "${have}" == yes ]]; then
+        # Check the installed distribution, not an importable module: hyphens
+        # are invalid in module names (find_spec would always miss them) and
+        # "rocm" is a meta package with no importable module at all.
+        if "${ROCM_PYTHON}" -c "import importlib.metadata, sys; sys.exit(0 if importlib.metadata.version(\"${pkg%%==*}\") else 1)" 2>/dev/null; then
             continue
         fi
         sdk_packages+=("${pkg}")
@@ -980,10 +982,10 @@ clone_rocm_systems() {
     fi
 
     git clone "${ROCM_SYSTEMS_REPO}" "${ROCM_SYSTEMS_SRC_DIR}"
-    pushd "${ROCM_SYSTEMS_SRC_DIR}"
+    pushd "${ROCM_SYSTEMS_SRC_DIR}" > /dev/null || return 1
     git reset --hard "${ROCM_SYSTEMS_COMMIT}"
     git submodule update --init --recursive --depth=1 projects/rccl projects/rccl-tests
-    popd
+    popd > /dev/null || return 1
 }
 
 # Generate the public rccl.h from the pinned rocm-systems source when the SDK
@@ -1034,9 +1036,14 @@ generate_rccl_header_from_source() {
             [[ -n "${device_header}" ]] || continue
             # hip_compat.h is copied as-is by the rccl build (it contains both
             # CUDA and HIP code paths); hipifying it breaks amdgcn builtins.
-            [[ "${device_header}" == */hip_compat.h ]] && continue
-            hipify-perl -quiet-warnings "${device_header}" -o "${device_header}.hip" 2>/dev/null \
-                && mv "${device_header}.hip" "${device_header}" || rm -f "${device_header}.hip"
+            if [[ "${device_header}" == */hip_compat.h ]]; then
+                continue
+            fi
+            if hipify-perl -quiet-warnings "${device_header}" -o "${device_header}.hip" 2>/dev/null; then
+                mv "${device_header}.hip" "${device_header}"
+            else
+                rm -f "${device_header}.hip"
+            fi
         done < <(find "${out_dir}/include/nccl_device" -type f -name '*.h')
         # hipify renames basename-colliding includes with _tmp suffixes
         # (core.h -> core_tmp.h, gin.h -> gin_tmp.h, ...). Create the aliased
@@ -1412,7 +1419,7 @@ build_osu() {
 
     curl -fsSL "http://mvapich.cse.ohio-state.edu/download/mvapich/osu-micro-benchmarks-${OSU_VERSION}.tar.gz" -o /tmp/osu.tar.gz
     tar --no-same-owner --no-same-permissions -C /tmp -xzf /tmp/osu.tar.gz
-    pushd "/tmp/osu-micro-benchmarks-${OSU_VERSION}"
+    pushd "/tmp/osu-micro-benchmarks-${OSU_VERSION}" > /dev/null || return 1
     CC="${OMPI_PREFIX}/bin/mpicc" \
     CXX="${OMPI_PREFIX}/bin/mpicxx" \
     CFLAGS="-O3" \
@@ -1422,7 +1429,7 @@ build_osu() {
         --with-rocm="${ROCM_BUILD_PREFIX}"
     make -j"$(make_jobs)"
     make install
-    popd
+    popd > /dev/null || return 1
     rm -rf "/tmp/osu-micro-benchmarks-${OSU_VERSION}" /tmp/osu.tar.gz "${ROCM_SYSTEMS_SRC_DIR:-/tmp/rocm-systems}" "${RCCL_BUILDDIR:-/tmp/rccl-build}"
     ldconfig
 }
