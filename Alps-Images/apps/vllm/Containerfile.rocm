@@ -21,12 +21,17 @@ LABEL org.opencontainers.image.source="${OCI_SOURCE}" \
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_REF="v0.29.0"
+ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+ARG AITER_REF="v0.1.19"
+ARG AITER_COMMIT="31350226161346314b3d8882c8085bd31dce6a34"
 ARG VLLM_TARGET_DEVICE="rocm"
+# MI300A and MI300X share gfx942. Keep vLLM and AITER single-architecture.
 ARG PYTORCH_ROCM_ARCH="gfx942"
 ARG MAX_JOBS="32"
 
 ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
+    GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
     MAX_JOBS="${MAX_JOBS}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}"
 
@@ -86,6 +91,20 @@ RUN set -eux; \
       setuptools-rust \
       setuptools-scm \
       wheel; \
+    rm -rf /opt/aiter /tmp/aiter-dist; \
+    git clone --depth=1 --branch "${AITER_REF}" --recurse-submodules --shallow-submodules \
+      "${AITER_REPO}" /opt/aiter; \
+    test "$(git -C /opt/aiter rev-parse HEAD)" = "${AITER_COMMIT}"; \
+    cd /opt/aiter; \
+    pip_install python --no-cache-dir -r requirements.txt; \
+    mkdir -p /tmp/aiter-dist; \
+    env -u ROCM_PATH -u HIP_PATH \
+      PREBUILD_KERNELS=1 \
+      AITER_USE_SYSTEM_TRITON=1 \
+      GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
+      MAX_JOBS="${MAX_JOBS}" \
+      python setup.py bdist_wheel --dist-dir /tmp/aiter-dist; \
+    pip_install python --no-cache-dir --no-deps /tmp/aiter-dist/*.whl; \
     rm -rf /opt/vllm; \
     git clone --recursive "${VLLM_REPO}" /opt/vllm; \
     cd /opt/vllm; \
@@ -110,9 +129,10 @@ RUN set -eux; \
     printf '%s\n' "${torch_lib_dir}" > /etc/ld.so.conf.d/99-alps-vllm-torch.conf; \
     ldconfig; \
     cleanup_new_apt_build_deps /tmp/vllm-apt-before.txt "${vllm_apt_build_deps[@]}"; \
-    rm -rf /tmp/vllm-apt-before.txt /root/.cache/pip
+    rm -rf /opt/aiter /tmp/aiter-dist /tmp/vllm-apt-before.txt /root/.cache/pip
 
 RUN set -eux; \
+    python -c 'import importlib.metadata as m; print("amd-aiter={}".format(m.version("amd-aiter")))'; \
     python -c 'import torch; print("torch={} hip={}".format(torch.__version__, torch.version.hip))'; \
     python -m pip check || echo "WARN: inconsistent pip dependency resolution (see above)"; \
     vllm_dir="$(python -c 'import importlib.util; spec = importlib.util.find_spec("vllm"); print(spec.submodule_search_locations[0] if spec else "")')"; \
