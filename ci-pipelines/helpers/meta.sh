@@ -402,7 +402,7 @@ rocm_base_refs() {
   local name="${rocm_name}-rocm"
   local tag="${rocm_variant}-${ALPS_REV}"
   local h
-  h="$(content_hash "name tag base_image_ref ROCM_VERSION ROCM_PYPI_INDEX_URL ROCM_REBUILD_RCCL ROCM_SYSTEMS_REPO ROCM_SYSTEMS_COMMIT RCCL_GPU_TARGETS RCCL_TESTS_GPU_TARGETS CSCS_CI_ORIG_CLONE_URL" "${hash_paths[@]}")"
+  h="$(content_hash "name tag base_image_ref ROCM_VERSION ROCM_PYPI_INDEX_URL ROCM_REBUILD_RCCL ROCM_SYSTEMS_REPO ROCM_SYSTEMS_COMMIT ROCM_LIBRARIES_REPO ROCM_LIBRARIES_COMMIT RCCL_GPU_TARGETS RCCL_TESTS_GPU_TARGETS CSCS_CI_ORIG_CLONE_URL" "${hash_paths[@]}")"
   local canon_ref stable_ref
   read -r canon_ref stable_ref < <(image_refs "$name" "$tag" "$h")
 
