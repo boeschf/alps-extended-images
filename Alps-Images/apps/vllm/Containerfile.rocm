@@ -33,7 +33,8 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
     GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
     MAX_JOBS="${MAX_JOBS}" \
-    CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}"
+    CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
+    LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64"
 
 COPY Alps-Images/common/package-helpers.sh /opt/alps/package-helpers.sh
 
@@ -98,8 +99,9 @@ RUN set -eux; \
     cd /opt/aiter; \
     pip_install python --no-cache-dir -r requirements.txt; \
     mkdir -p /tmp/aiter-dist; \
+    echo "Building AITER without multi-architecture AOT; runtime JIT target: ${PYTORCH_ROCM_ARCH}"; \
     env -u ROCM_PATH -u HIP_PATH \
-      PREBUILD_KERNELS=1 \
+      PREBUILD_KERNELS=0 \
       AITER_USE_SYSTEM_TRITON=1 \
       GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
       MAX_JOBS="${MAX_JOBS}" \
