@@ -33,12 +33,16 @@ ARG VLLM_TARGET_DEVICE="rocm"
 # MI300A and MI300X share gfx942. Keep vLLM and AITER single-architecture.
 ARG PYTORCH_ROCM_ARCH="gfx942"
 ARG MAX_JOBS="32"
+LABEL org.opencontainers.image.uccl.revision="${UCCL_COMMIT}" \
+      org.opencontainers.image.aiter.revision="${AITER_COMMIT}"
 
 ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
     GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
     MAX_JOBS="${MAX_JOBS}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
+    PIP_INDEX_URL="https://jfrog.svc.cscs.ch/artifactory/api/pypi/pypi-remote/simple" \
+    PYTHONNOUSERSITE="1" \
     LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64" \
     UCCL_EP_TRANSPORT="cxi" \
     UCCL_SOCKET_IFNAME="hsn"
@@ -49,6 +53,10 @@ COPY Alps-Images/apps/vllm/patches/ /opt/alps-vllm-patches/
 
 RUN set -eux; \
     source /opt/alps/package-helpers.sh; \
+    mkdir -p /opt/alps; \
+    python -c 'import importlib.metadata as m; names = ("torch", "triton"); installed = {d.metadata["Name"].lower(): d.version for d in m.distributions() if d.metadata["Name"]}; missing = [n for n in names if n not in installed]; assert not missing, f"missing base packages: {missing}"; print("\n".join(f"{n}=={installed[n]}" for n in names))' > /opt/alps/vllm-base-pins.txt; \
+    export PIP_CONSTRAINT=/opt/alps/vllm-base-pins.txt; \
+    cat "${PIP_CONSTRAINT}"; \
     vllm_apt_build_deps=( \
       build-essential \
       cargo \
@@ -153,7 +161,9 @@ RUN set -eux; \
     elif [ -n "${VLLM_VERSION_OVERRIDE}" ]; then \
       export VLLM_VERSION_OVERRIDE; \
     fi; \
-    shopt -s nullglob; vllm_patch_files=(/opt/alps-vllm-patches/*.patch); shopt -u nullglob; \
+    shopt -s nullglob; \
+    vllm_patch_files=(/opt/alps-vllm-patches/*.patch /opt/alps-vllm-patches/vllm/*.patch); \
+    shopt -u nullglob; \
     for patch_file in "${vllm_patch_files[@]}"; do \
       echo "Applying vLLM patch: ${patch_file}"; \
       git apply --check "${patch_file}"; \
@@ -176,6 +186,12 @@ RUN set -eux; \
     rm -rf /opt/aiter /tmp/aiter-dist /opt/uccl /tmp/uccl-ep-build /tmp/vllm-apt-before.txt /root/.cache/pip
 
 RUN set -eux; \
+    while IFS= read -r pin; do \
+      package="${pin%%==*}"; \
+      expected="${pin#*==}"; \
+      actual="$(python -c 'import importlib.metadata as m, sys; print(m.version(sys.argv[1]))' "${package}")"; \
+      test "${actual}" = "${expected}"; \
+    done < /opt/alps/vllm-base-pins.txt; \
     vllm_version="$(python -c 'import importlib.metadata as m; print(m.version("vllm"))')"; \
     printf 'vllm=%s\n' "${vllm_version}"; \
     expected_vllm_version="${VLLM_VERSION_OVERRIDE}"; \
