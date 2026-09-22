@@ -41,7 +41,6 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
     MAX_JOBS="${MAX_JOBS}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
-    PIP_INDEX_URL="https://jfrog.svc.cscs.ch/artifactory/api/pypi/pypi-remote/simple" \
     PYTHONNOUSERSITE="1" \
     LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64" \
     UCCL_EP_TRANSPORT="cxi" \

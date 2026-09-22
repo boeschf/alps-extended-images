@@ -28,6 +28,7 @@ ARG UCCL_NUM_LOCAL_GPUS="4"
 ARG UCCL_MAX_JOBS="16"
 ARG MODEL_STREAMER_REPO="https://github.com/dsx-ai-factory/model-streamer"
 ARG MODEL_STREAMER_VERSION="0.16.1"
+ARG NIXL_VERSION="1.4.1"
 ARG VLLM_TARGET_DEVICE="cuda"
 ARG VLLM_CUDA_ARCH_LIST="9.0"
 ARG VLLM_TORCH_CUDA_ARCH_LIST="9.0"
@@ -35,7 +36,8 @@ ARG VLLM_VERSION_OVERRIDE=""
 ARG MAX_JOBS="16"
 ARG NVCC_THREADS="4"
 LABEL org.opencontainers.image.uccl.revision="${UCCL_COMMIT}" \
-      org.opencontainers.image.runai-model-streamer.version="${MODEL_STREAMER_VERSION}"
+      org.opencontainers.image.runai-model-streamer.version="${MODEL_STREAMER_VERSION}" \
+      org.opencontainers.image.nixl.version="${NIXL_VERSION}"
 
 ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     CUDA_ARCH_LIST="${VLLM_CUDA_ARCH_LIST}" \
@@ -43,7 +45,7 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     MAX_JOBS="${MAX_JOBS}" \
     NVCC_THREADS="${NVCC_THREADS}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
-    PIP_INDEX_URL="https://jfrog.svc.cscs.ch/artifactory/api/pypi/pypi-remote/simple" \
+    NIXL_VERSION="${NIXL_VERSION}" \
     PYTHONNOUSERSITE="1" \
     CCACHE_NOHASHDIR="true" \
     UCCL_EP_TRANSPORT="cxi" \
@@ -151,7 +153,7 @@ RUN set -eux; \
     pip_install python --no-cache-dir -r requirements/cuda-alps.txt; \
     python setup.py bdist_wheel --dist-dir /tmp/vllm-dist --py-limited-api=cp38; \
     pip_install python --no-cache-dir --no-deps /tmp/vllm-dist/*.whl; \
-    pip_install python --no-cache-dir "ray[default]" sentencepiece tiktoken; \
+    pip_install python --no-cache-dir "nixl==${NIXL_VERSION}" "ray[default]" sentencepiece tiktoken; \
     arch="$(uname -m)"; \
     pip_install python --no-cache-dir --no-deps \
       "${MODEL_STREAMER_REPO}/releases/download/${MODEL_STREAMER_VERSION}/runai_model_streamer-${MODEL_STREAMER_VERSION}-py3-none-manylinux2014_${arch}.whl"; \
@@ -174,6 +176,7 @@ RUN set -eux; \
     python -c 'import uccl.ep; import deep_ep; print("uccl.ep={} deep_ep={}".format(uccl.ep.__file__, deep_ep.__file__))'; \
     python -c 'import flashinfer; print("flashinfer={}".format(flashinfer.__version__))'; \
     python -c 'import importlib.metadata as m; import runai_model_streamer; print("runai-model-streamer={} {}".format(m.version("runai-model-streamer"), runai_model_streamer.__file__))'; \
+    python -c 'import importlib.metadata as m, sys; expected = sys.argv[1]; actual = m.version("nixl"); assert actual == expected, f"nixl: expected {expected}, got {actual}"; print(f"nixl={actual}")' "${NIXL_VERSION}"; \
     cubin_dir="$(python -c 'from flashinfer.jit.env import FLASHINFER_CUBIN_DIR; print(FLASHINFER_CUBIN_DIR)')"; \
     echo "INFO: flashinfer resolves cubins from ${cubin_dir}"; \
     cubin_count="$(find "${cubin_dir}" -name '*.cubin' 2>/dev/null | wc -l)"; \

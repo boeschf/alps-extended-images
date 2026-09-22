@@ -157,6 +157,7 @@ class Worker:
 
         torch.cuda.set_device(0)
         aiter_version = None
+        nixl_version = None
         import deep_ep
         from uccl import ep as uccl_ep
         from vllm.utils.import_utils import has_deep_ep
@@ -192,6 +193,22 @@ class Worker:
             if not is_aiter_found_and_supported():
                 raise AssertionError("vLLM does not recognize the installed AITER package")
             aiter_version = getattr(aiter, "__version__", "unknown")
+        if torch.version.cuda is not None:
+            import importlib.metadata as metadata
+
+            from vllm.distributed import nixl_utils
+
+            if not nixl_utils.is_nixl_available():
+                raise AssertionError("vLLM does not detect the installed NIXL package")
+            nixl_agent = nixl_utils.NixlWrapper(f"alps-smoke-{rank}")
+            if not nixl_agent.get_agent_metadata():
+                raise AssertionError("NIXL agent returned empty metadata")
+            import nixl._api  # noqa: F401
+            import nixl._bindings  # noqa: F401
+
+            nixl_version = metadata.version("nixl")
+            if nixl_version != "1.4.1":
+                raise AssertionError(f"expected NIXL 1.4.1, got {nixl_version}")
         dist.init_process_group(
             backend="nccl",
             init_method="env://",
@@ -266,6 +283,7 @@ class Worker:
             "torch": torch.__version__,
             "vllm": getattr(vllm, "__version__", "unknown"),
             "aiter": aiter_version,
+            "nixl": nixl_version,
             "uccl_ep": uccl_ep_path,
             "uccl_ep_ready": uccl_ep_ready,
         }
