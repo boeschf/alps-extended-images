@@ -20,10 +20,15 @@ LABEL org.opencontainers.image.source="${OCI_SOURCE}" \
       com.cscs.alps.git.commit_short="${CSCS_ALPS_GIT_COMMIT_SHORT}"
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_REF="v0.29.0"
+ARG VLLM_REF="v0.30.0"
+ARG VLLM_VERSION_OVERRIDE=""
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG AITER_REF="v0.1.19"
-ARG AITER_COMMIT="31350226161346314b3d8882c8085bd31dce6a34"
+ARG AITER_REF="v0.1.21.post2"
+ARG AITER_COMMIT="2e38b2405bd688fd2d8e9fea9e7ba8f3eb9abee9"
+ARG UCCL_REPO="https://github.com/uccl-project/uccl.git"
+ARG UCCL_COMMIT="e22a3e8fcd636f7efbbd90900458087a41ff73ce"
+ARG UCCL_NANOBIND_VERSION="3.0.1"
+ARG UCCL_NUM_LOCAL_GPUS="4"
 ARG VLLM_TARGET_DEVICE="rocm"
 # MI300A and MI300X share gfx942. Keep vLLM and AITER single-architecture.
 ARG PYTORCH_ROCM_ARCH="gfx942"
@@ -34,7 +39,9 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
     MAX_JOBS="${MAX_JOBS}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
-    LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64"
+    LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64" \
+    UCCL_EP_TRANSPORT="cxi" \
+    UCCL_SOCKET_IFNAME="hsn"
 
 COPY Alps-Images/common/package-helpers.sh /opt/alps/package-helpers.sh
 
@@ -48,12 +55,16 @@ RUN set -eux; \
       cmake \
       curl \
       git \
+      libibverbs-dev \
+      libnl-3-dev \
+      libnl-route-3-dev \
+      libnuma-dev \
       ninja-build \
       pkg-config \
       rustc \
       python3-dev \
     ); \
-    vllm_apt_install_packages=(ca-certificates "${vllm_apt_build_deps[@]}"); \
+    vllm_apt_install_packages=(ca-certificates libibverbs1 "${vllm_apt_build_deps[@]}"); \
     snapshot_apt_packages /tmp/vllm-apt-before.txt; \
     apt_get update; \
     apt_get install -y --no-install-recommends "${vllm_apt_install_packages[@]}"; \
@@ -88,6 +99,7 @@ RUN set -eux; \
       pybind11 \
       scipy \
       'huggingface-hub[cli]' \
+      "nanobind==${UCCL_NANOBIND_VERSION}" \
       'setuptools>=77.0.3,<80.0.0' \
       setuptools-rust \
       setuptools-scm \
@@ -107,11 +119,40 @@ RUN set -eux; \
       MAX_JOBS="${MAX_JOBS}" \
       python setup.py bdist_wheel --dist-dir /tmp/aiter-dist; \
     pip_install python --no-cache-dir --no-deps /tmp/aiter-dist/*.whl; \
+    rm -rf /opt/uccl /tmp/uccl-ep-build; \
+    git init -q /opt/uccl; \
+    git -C /opt/uccl remote add origin "${UCCL_REPO}"; \
+    git -C /opt/uccl fetch --depth=1 origin "${UCCL_COMMIT}"; \
+    git -C /opt/uccl checkout -q --detach FETCH_HEAD; \
+    test "$(git -C /opt/uccl rev-parse HEAD)" = "${UCCL_COMMIT}"; \
+    shopt -s nullglob; uccl_patch_files=(/opt/alps-vllm-patches/uccl/*.patch); shopt -u nullglob; \
+    for patch_file in "${uccl_patch_files[@]}"; do \
+      echo "Applying UCCL patch: ${patch_file}"; \
+      git -C /opt/uccl apply --check "${patch_file}"; \
+      git -C /opt/uccl apply "${patch_file}"; \
+    done; \
+    uccl_site_packages="$(python -c 'import site; print(site.getsitepackages()[0])')"; \
+    cd /opt/uccl/ep; \
+    LIBFABRIC_HOME=/usr \
+      USE_LIBFABRIC_CXI=1 \
+      PER_EXPERT_BATCHING=1 \
+      NUM_MAX_NVL_PEERS="${UCCL_NUM_LOCAL_GPUS}" \
+      MAX_NUM_GPUS="${UCCL_NUM_LOCAL_GPUS}" \
+      PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
+      INSTALL_DIR="${uccl_site_packages}/uccl" \
+      python setup.py build --build-base /tmp/uccl-ep-build install; \
+    printf '%s\n' '"""UCCL expert-parallel extension."""' > "${uccl_site_packages}/uccl/__init__.py"; \
+    cp -LR /opt/uccl/ep/deep_ep_wrapper/deep_ep "${uccl_site_packages}/deep_ep"; \
     rm -rf /opt/vllm; \
     git clone --recursive "${VLLM_REPO}" /opt/vllm; \
     cd /opt/vllm; \
     git checkout -q "${VLLM_REF}"; \
     git submodule update --init --recursive; \
+    if [ -z "${VLLM_VERSION_OVERRIDE}" ] && [[ "${VLLM_REF}" == v[0-9]* ]]; then \
+      export VLLM_VERSION_OVERRIDE="${VLLM_REF#v}"; \
+    elif [ -n "${VLLM_VERSION_OVERRIDE}" ]; then \
+      export VLLM_VERSION_OVERRIDE; \
+    fi; \
     shopt -s nullglob; vllm_patch_files=(/opt/alps-vllm-patches/*.patch); shopt -u nullglob; \
     for patch_file in "${vllm_patch_files[@]}"; do \
       echo "Applying vLLM patch: ${patch_file}"; \
@@ -130,12 +171,19 @@ RUN set -eux; \
     test -d "${torch_lib_dir}"; \
     printf '%s\n' "${torch_lib_dir}" > /etc/ld.so.conf.d/99-alps-vllm-torch.conf; \
     ldconfig; \
-    cleanup_new_apt_build_deps /tmp/vllm-apt-before.txt "${vllm_apt_build_deps[@]}"; \
-    rm -rf /opt/aiter /tmp/aiter-dist /tmp/vllm-apt-before.txt /root/.cache/pip
+    APT_CLEANUP_HOLD_PACKAGES=libibverbs1 \
+      cleanup_new_apt_build_deps /tmp/vllm-apt-before.txt "${vllm_apt_build_deps[@]}"; \
+    rm -rf /opt/aiter /tmp/aiter-dist /opt/uccl /tmp/uccl-ep-build /tmp/vllm-apt-before.txt /root/.cache/pip
 
 RUN set -eux; \
+    vllm_version="$(python -c 'import importlib.metadata as m; print(m.version("vllm"))')"; \
+    printf 'vllm=%s\n' "${vllm_version}"; \
+    expected_vllm_version="${VLLM_VERSION_OVERRIDE}"; \
+    if [ -z "${expected_vllm_version}" ] && [[ "${VLLM_REF}" == v[0-9]* ]]; then expected_vllm_version="${VLLM_REF#v}"; fi; \
+    if [ -n "${expected_vllm_version}" ]; then test "${vllm_version}" = "${expected_vllm_version}"; fi; \
     python -c 'import importlib.metadata as m; print("amd-aiter={}".format(m.version("amd-aiter")))'; \
     python -c 'import torch; print("torch={} hip={}".format(torch.__version__, torch.version.hip))'; \
+    python -c 'import uccl.ep; import deep_ep; print("uccl.ep={} deep_ep={}".format(uccl.ep.__file__, deep_ep.__file__))'; \
     python -m pip check || echo "WARN: inconsistent pip dependency resolution (see above)"; \
     vllm_dir="$(python -c 'import importlib.util; spec = importlib.util.find_spec("vllm"); print(spec.submodule_search_locations[0] if spec else "")')"; \
     if [ -z "${vllm_dir}" ]; then \
@@ -147,6 +195,17 @@ RUN set -eux; \
     if [ -n "${missing}" ]; then \
       echo "FATAL: vLLM native extensions have unresolved dependencies:" >&2; \
       echo "${missing}" >&2; \
+      exit 1; \
+    fi; \
+    uccl_ep_so="$(python -c 'import uccl.ep; print(uccl.ep.__file__)')"; \
+    missing="$(ldd "${uccl_ep_so}" 2>/dev/null | grep 'not found' || true)"; \
+    if [ -n "${missing}" ]; then \
+      echo "FATAL: UCCL-EP has unresolved dependencies:" >&2; \
+      echo "${missing}" >&2; \
+      exit 1; \
+    fi; \
+    if dpkg-query -W -f='${db:Status-Abbrev}' libibverbs-dev 2>/dev/null | grep -q '^ii '; then \
+      echo "FATAL: libibverbs-dev remains installed after the UCCL-EP build" >&2; \
       exit 1; \
     fi; \
     echo "OK: vLLM ROCm smoke checks passed"

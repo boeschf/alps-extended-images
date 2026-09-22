@@ -156,8 +156,12 @@ class Worker:
 
         torch.cuda.set_device(0)
         aiter_version = None
+        uccl_ep_path = None
+        deep_ep_module = None
         if torch.version.hip is not None:
             import aiter
+            import deep_ep
+            from uccl import ep as uccl_ep
             from vllm._aiter_ops import is_aiter_found_and_supported
 
             arch = torch.cuda.get_device_properties(0).gcnArchName.split(":", 1)[0]
@@ -166,6 +170,8 @@ class Worker:
             if not is_aiter_found_and_supported():
                 raise AssertionError("vLLM does not recognize the installed AITER package")
             aiter_version = getattr(aiter, "__version__", "unknown")
+            uccl_ep_path = uccl_ep.__file__
+            deep_ep_module = deep_ep
         dist.init_process_group(
             backend="nccl",
             init_method="env://",
@@ -176,8 +182,63 @@ class Worker:
         value = torch.ones(1, device="cuda")
         dist.all_reduce(value)
         got = int(value.item())
-        dist.destroy_process_group()
 
+        uccl_ep_ready = False
+        if deep_ep_module is not None:
+            num_tokens = 8
+            hidden = 2048
+            num_topk = 2
+            num_experts = max(world_size * 2, 16)
+            rdma_bytes = deep_ep_module.Buffer.get_low_latency_rdma_size_hint(
+                num_tokens, hidden, world_size, num_experts
+            )
+            ep_buffer = deep_ep_module.Buffer(
+                dist.group.WORLD,
+                num_rdma_bytes=rdma_bytes,
+                low_latency_mode=True,
+                num_qps_per_rank=max(1, num_experts // world_size),
+                allow_nvlink_for_low_latency_mode=True,
+                explicitly_destroy=True,
+            )
+            x = torch.full(
+                (num_tokens, hidden),
+                rank + 1,
+                dtype=torch.bfloat16,
+                device=value.device,
+            )
+            topk_idx = (
+                torch.arange(num_tokens * num_topk, device=value.device)
+                .reshape(num_tokens, num_topk)
+                .add(rank)
+                .remainder(num_experts)
+            )
+            recv_x, recv_count, handle, _, _ = ep_buffer.low_latency_dispatch(
+                x,
+                topk_idx,
+                num_tokens,
+                num_experts,
+                use_fp8=False,
+            )
+            expected_count = torch.full_like(recv_count, world_size)
+            torch.testing.assert_close(recv_count, expected_count, rtol=0, atol=0)
+            combined_x, _, _ = ep_buffer.low_latency_combine(
+                recv_x,
+                topk_idx,
+                torch.ones_like(topk_idx, dtype=torch.float32),
+                handle,
+            )
+            torch.testing.assert_close(
+                combined_x,
+                torch.full_like(combined_x, 2 * (rank + 1)),
+                rtol=0,
+                atol=0,
+            )
+            dist.barrier()
+            ep_buffer.destroy()
+            dist.barrier()
+            uccl_ep_ready = True
+
+        dist.destroy_process_group()
         if got != world_size:
             raise AssertionError(f"rank {rank}: expected all_reduce={world_size}, got {got}")
 
@@ -187,6 +248,8 @@ class Worker:
             "torch": torch.__version__,
             "vllm": getattr(vllm, "__version__", "unknown"),
             "aiter": aiter_version,
+            "uccl_ep": uccl_ep_path,
+            "uccl_ep_ready": uccl_ep_ready,
         }
 
 
