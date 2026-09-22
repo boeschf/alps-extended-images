@@ -21,6 +21,10 @@ LABEL org.opencontainers.image.source="${OCI_SOURCE}" \
 
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_REF="v0.30.0"
+ARG UCCL_REPO="https://github.com/uccl-project/uccl.git"
+ARG UCCL_COMMIT="e22a3e8fcd636f7efbbd90900458087a41ff73ce"
+ARG UCCL_NANOBIND_VERSION="3.0.1"
+ARG UCCL_NUM_LOCAL_GPUS="4"
 ARG VLLM_TARGET_DEVICE="cuda"
 ARG VLLM_CUDA_ARCH_LIST="9.0"
 ARG VLLM_TORCH_CUDA_ARCH_LIST="9.0"
@@ -34,9 +38,13 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     MAX_JOBS="${MAX_JOBS}" \
     NVCC_THREADS="${NVCC_THREADS}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
-    CCACHE_NOHASHDIR="true"
+    CCACHE_NOHASHDIR="true" \
+    UCCL_EP_TRANSPORT="cxi" \
+    UCCL_SOCKET_IFNAME="hsn"
 
 COPY Alps-Images/common/package-helpers.sh /opt/alps/package-helpers.sh
+
+COPY Alps-Images/apps/vllm/patches/uccl/ /opt/alps-uccl-patches/
 
 RUN set -eux; \
     source /opt/alps/package-helpers.sh; \
@@ -46,12 +54,16 @@ RUN set -eux; \
       cmake \
       curl \
       git \
+      libibverbs-dev \
+      libnl-3-dev \
+      libnl-route-3-dev \
+      libnuma-dev \
       ninja-build \
       pkg-config \
       rustc \
       python3-dev \
     ); \
-    vllm_apt_install_packages=(ca-certificates "${vllm_apt_build_deps[@]}"); \
+    vllm_apt_install_packages=(ca-certificates libibverbs1 "${vllm_apt_build_deps[@]}"); \
     snapshot_apt_packages /tmp/vllm-apt-before.txt; \
     apt_get update; \
     apt_get install -y --no-install-recommends "${vllm_apt_install_packages[@]}"; \
@@ -62,6 +74,7 @@ RUN set -eux; \
       jinja2 \
       'packaging<=25.0' \
       'setuptools>=77.0.3,<81.0.0' \
+      "nanobind==${UCCL_NANOBIND_VERSION}" \
       setuptools-rust \
       setuptools-scm; \
     export CUDA_ARCH_LIST="${VLLM_CUDA_ARCH_LIST}" \
@@ -71,6 +84,31 @@ RUN set -eux; \
       CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}"; \
     printf 'CUDA_ARCH_LIST=%s\nTORCH_CUDA_ARCH_LIST=%s\nMAX_JOBS=%s\nNVCC_THREADS=%s\n' \
       "${CUDA_ARCH_LIST}" "${TORCH_CUDA_ARCH_LIST}" "${MAX_JOBS}" "${NVCC_THREADS}"; \
+    rm -rf /tmp/uccl /tmp/uccl-ep-build; \
+    git init -q /tmp/uccl; \
+    git -C /tmp/uccl remote add origin "${UCCL_REPO}"; \
+    git -C /tmp/uccl fetch --depth=1 origin "${UCCL_COMMIT}"; \
+    git -C /tmp/uccl checkout -q --detach FETCH_HEAD; \
+    test "$(git -C /tmp/uccl rev-parse HEAD)" = "${UCCL_COMMIT}"; \
+    shopt -s nullglob; uccl_patch_files=(/opt/alps-uccl-patches/*.patch); shopt -u nullglob; \
+    for patch_file in "${uccl_patch_files[@]}"; do \
+      echo "Applying UCCL patch: ${patch_file}"; \
+      git -C /tmp/uccl apply --check "${patch_file}"; \
+      git -C /tmp/uccl apply "${patch_file}"; \
+    done; \
+    uccl_site_packages="$(python -c 'import site; print(site.getsitepackages()[0])')"; \
+    cd /tmp/uccl/ep; \
+    LIBFABRIC_HOME=/usr \
+      USE_LIBFABRIC_CXI=1 \
+      UCCL_EP_FORCE_GRACE_HOPPER=1 \
+      PER_EXPERT_BATCHING=1 \
+      NUM_MAX_NVL_PEERS="${UCCL_NUM_LOCAL_GPUS}" \
+      MAX_NUM_GPUS="${UCCL_NUM_LOCAL_GPUS}" \
+      TORCH_CUDA_ARCH_LIST="${VLLM_TORCH_CUDA_ARCH_LIST}" \
+      INSTALL_DIR="${uccl_site_packages}/uccl" \
+      python setup.py build --build-base /tmp/uccl-ep-build install; \
+    printf '%s\n' '"""UCCL expert-parallel extension."""' > "${uccl_site_packages}/uccl/__init__.py"; \
+    cp -LR /tmp/uccl/ep/deep_ep_wrapper/deep_ep "${uccl_site_packages}/deep_ep"; \
     rm -rf /tmp/vllm; \
     git clone --recursive "${VLLM_REPO}" /tmp/vllm; \
     cd /tmp/vllm; \
@@ -96,11 +134,13 @@ RUN set -eux; \
     test -d "${torch_lib_dir}"; \
     printf '%s\n' "${torch_lib_dir}" > /etc/ld.so.conf.d/99-alps-vllm-torch.conf; \
     ldconfig; \
-    cleanup_new_apt_build_deps /tmp/vllm-apt-before.txt "${vllm_apt_build_deps[@]}"; \
-    rm -rf /tmp/vllm /tmp/vllm-dist /tmp/vllm-build-requirements.txt /tmp/vllm-apt-before.txt /root/.cache/pip
+    APT_CLEANUP_HOLD_PACKAGES=libibverbs1 \
+      cleanup_new_apt_build_deps /tmp/vllm-apt-before.txt "${vllm_apt_build_deps[@]}"; \
+    rm -rf /tmp/uccl /tmp/uccl-ep-build /tmp/vllm /tmp/vllm-dist /tmp/vllm-build-requirements.txt /tmp/vllm-apt-before.txt /root/.cache/pip
 
 RUN set -eux; \
     python -c 'import torch, vllm; print("torch={} cuda={}".format(torch.__version__, torch.version.cuda)); print("vllm={}".format(getattr(vllm, "__version__", "unknown")))'; \
+    python -c 'import uccl.ep; import deep_ep; print("uccl.ep={} deep_ep={}".format(uccl.ep.__file__, deep_ep.__file__))'; \
     python -c 'import flashinfer; print("flashinfer={}".format(flashinfer.__version__))'; \
     cubin_dir="$(python -c 'from flashinfer.jit.env import FLASHINFER_CUBIN_DIR; print(FLASHINFER_CUBIN_DIR)')"; \
     echo "INFO: flashinfer resolves cubins from ${cubin_dir}"; \
@@ -118,6 +158,17 @@ RUN set -eux; \
       | grep -i -E '^(cuda-toolkit|nvidia-|flashinfer)' \
       || echo "  (none)"; \
     python -m pip check || echo "WARN: inconsistent pip dependency resolution (see above)"; \
+    uccl_ep_so="$(python -c 'import uccl.ep; print(uccl.ep.__file__)')"; \
+    missing="$(ldd "${uccl_ep_so}" 2>/dev/null | awk '/not found/ { print }' || true)"; \
+    if [ -n "${missing}" ]; then \
+      echo "FATAL: UCCL-EP has unresolved dependencies:" >&2; \
+      echo "${missing}" >&2; \
+      exit 1; \
+    fi; \
+    if dpkg-query -W -f='${db:Status-Abbrev}' libibverbs-dev 2>/dev/null | grep -q '^ii '; then \
+      echo "FATAL: libibverbs-dev must not remain in the runtime image" >&2; \
+      exit 1; \
+    fi; \
     all_missing="$(find "$(python -c 'import vllm; print(vllm.__path__[0])')" -name '*.so' \
                  -exec ldd {} + 2>/dev/null | awk '/not found/ { print }' || true)"; \
     ignored_missing="$(printf '%s\n' "${all_missing}" | awk '$1 == "libcuda.so.1" { print }')"; \

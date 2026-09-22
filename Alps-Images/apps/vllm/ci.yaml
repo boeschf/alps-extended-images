@@ -2,7 +2,7 @@ tests:
   cuda:
     - name: vetnode
       kind: cuda-vetnode
-    - name: ray-nccl
+    - name: ray-nccl-uccl-ep
       runner: cuda
       timeout: 30m
       script:

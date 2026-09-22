@@ -156,12 +156,13 @@ class Worker:
 
         torch.cuda.set_device(0)
         aiter_version = None
-        uccl_ep_path = None
-        deep_ep_module = None
+        import deep_ep
+        from uccl import ep as uccl_ep
+
+        uccl_ep_path = uccl_ep.__file__
+        deep_ep_module = deep_ep
         if torch.version.hip is not None:
             import aiter
-            import deep_ep
-            from uccl import ep as uccl_ep
             from vllm._aiter_ops import is_aiter_found_and_supported
 
             arch = torch.cuda.get_device_properties(0).gcnArchName.split(":", 1)[0]
@@ -170,8 +171,6 @@ class Worker:
             if not is_aiter_found_and_supported():
                 raise AssertionError("vLLM does not recognize the installed AITER package")
             aiter_version = getattr(aiter, "__version__", "unknown")
-            uccl_ep_path = uccl_ep.__file__
-            deep_ep_module = deep_ep
         dist.init_process_group(
             backend="nccl",
             init_method="env://",
