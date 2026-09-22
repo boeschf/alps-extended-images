@@ -28,7 +28,7 @@ ARG UCCL_NUM_LOCAL_GPUS="4"
 ARG UCCL_MAX_JOBS="16"
 ARG MODEL_STREAMER_REPO="https://github.com/dsx-ai-factory/model-streamer"
 ARG MODEL_STREAMER_VERSION="0.16.1"
-ARG NIXL_VERSION="1.4.1"
+ARG VLLM_NIXL_VERSION="1.4.1"
 ARG VLLM_TARGET_DEVICE="cuda"
 ARG VLLM_CUDA_ARCH_LIST="9.0"
 ARG VLLM_TORCH_CUDA_ARCH_LIST="9.0"
@@ -37,7 +37,7 @@ ARG MAX_JOBS="16"
 ARG NVCC_THREADS="4"
 LABEL org.opencontainers.image.uccl.revision="${UCCL_COMMIT}" \
       org.opencontainers.image.runai-model-streamer.version="${MODEL_STREAMER_VERSION}" \
-      org.opencontainers.image.nixl.version="${NIXL_VERSION}"
+      org.opencontainers.image.nixl.version="${VLLM_NIXL_VERSION}"
 
 ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     CUDA_ARCH_LIST="${VLLM_CUDA_ARCH_LIST}" \
@@ -45,7 +45,7 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     MAX_JOBS="${MAX_JOBS}" \
     NVCC_THREADS="${NVCC_THREADS}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
-    NIXL_VERSION="${NIXL_VERSION}" \
+    NIXL_VERSION="${VLLM_NIXL_VERSION}" \
     PYTHONNOUSERSITE="1" \
     CCACHE_NOHASHDIR="true" \
     UCCL_EP_TRANSPORT="cxi" \
@@ -154,9 +154,9 @@ RUN set -eux; \
     pip_install python --no-cache-dir -r requirements/cuda-alps.txt; \
     python setup.py bdist_wheel --dist-dir /tmp/vllm-dist --py-limited-api=cp38; \
     pip_install python --no-cache-dir --no-deps /tmp/vllm-dist/*.whl; \
-    pip_install python --no-cache-dir "nixl==${NIXL_VERSION}" "ray[default]" sentencepiece tiktoken; \
+    pip_install python --no-cache-dir "nixl==${VLLM_NIXL_VERSION}" "ray[default]" sentencepiece tiktoken; \
     arch="$(uname -m)"; \
-    pip_install python --no-cache-dir --no-deps \
+    pip_install python --no-cache-dir \
       "${MODEL_STREAMER_REPO}/releases/download/${MODEL_STREAMER_VERSION}/runai_model_streamer-${MODEL_STREAMER_VERSION}-py3-none-manylinux2014_${arch}.whl"; \
     torch_lib_dir="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"; \
     test -d "${torch_lib_dir}"; \
