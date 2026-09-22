@@ -32,8 +32,8 @@ ARG VLLM_TARGET_DEVICE="cuda"
 ARG VLLM_CUDA_ARCH_LIST="9.0"
 ARG VLLM_TORCH_CUDA_ARCH_LIST="9.0"
 ARG VLLM_VERSION_OVERRIDE=""
-ARG MAX_JOBS="2"
-ARG NVCC_THREADS="8"
+ARG MAX_JOBS="16"
+ARG NVCC_THREADS="4"
 LABEL org.opencontainers.image.uccl.revision="${UCCL_COMMIT}" \
       org.opencontainers.image.runai-model-streamer.version="${MODEL_STREAMER_VERSION}"
 
