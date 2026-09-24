@@ -18,3 +18,20 @@ The two-node CUDA and ROCm CI tests import both UCCL modules, construct a low-la
 The ROCm variant keeps a GPU-less-safe build-time smoke check: `import vllm` runs the platform probe and the module-level GCN-arch query, which initializes CUDA and fails on build containers without a visible GPU. The build only imports torch and locates the vLLM package via `importlib.util.find_spec`; the real ROCm `import vllm` coverage lives in the `ray-rccl-uccl-ep` test job.
 
 Older vLLM releases may need fewer changes. Releases `0.22` and older are suspected to work without these compatibility patches, but that still needs to be verified against the Alps CUDA/HPC stack.
+
+## Mooncake (CXI KV transfer)
+
+Both variants additionally install the [Mooncake](https://github.com/kvcache-ai/Mooncake) transfer engine with the HPE Slingshot (CXI) backend (`USE_CXI`, [kvcache-ai/Mooncake#2535](https://github.com/kvcache-ai/Mooncake/pull/2535)). It is built from a pinned tag by `sources/install-mooncake.sh` (which is part of the app content hash) and installed as the `mooncake-transfer-engine` wheel, providing the `mooncake.engine` and `mooncake.store` modules used by vLLM's `MooncakeConnector` and `MooncakeStoreConnector` KV connectors.
+
+Mooncake is compiled against the libfabric installed by the Alps base image (`/usr`), so it always matches the stack's libfabric version and shares a single in-process libfabric instance with the aws-ofi-nccl NCCL plugin. This is deliberate: a second, bundled libfabric would race for the CXI devices and leave one consumer with an empty provider list.
+
+On Slingshot, select the CXI transport in the extra config instead of the default `rdma` protocol, e.g.:
+
+```bash
+vllm serve <model> \
+    --kv-transfer-config \
+    '{"kv_connector": "MooncakeConnector", "kv_role": "kv_producer",
+      "kv_connector_extra_config": {"mooncake_protocol": "cxi"}}'
+```
+
+`device_name` may be left empty; Mooncake auto-discovers CXI devices. The image also ships the `mooncake_master` store service and the `transfer_engine_bench` utility for transport debugging. A single-node CXI smoke test runs in CI (`mooncake_smoke.sh`).
