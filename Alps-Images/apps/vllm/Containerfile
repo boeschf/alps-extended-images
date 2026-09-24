@@ -70,7 +70,6 @@ RUN set -eux; \
       curl \
       git \
       libdw-dev \
-      libibverbs-dev \
       libnl-3-dev \
       libnl-route-3-dev \
       libnuma-dev \
@@ -79,7 +78,7 @@ RUN set -eux; \
       rustc \
       python3-dev \
     ); \
-    vllm_apt_install_packages=(ca-certificates libibverbs1 "${vllm_apt_build_deps[@]}"); \
+    vllm_apt_install_packages=(ca-certificates libibverbs1 libibverbs-dev "${vllm_apt_build_deps[@]}"); \
     snapshot_apt_packages /tmp/vllm-apt-before.txt; \
     apt_get update; \
     apt_get install -y --no-install-recommends "${vllm_apt_install_packages[@]}"; \
@@ -162,7 +161,7 @@ RUN set -eux; \
     test -d "${torch_lib_dir}"; \
     printf '%s\n' "${torch_lib_dir}" > /etc/ld.so.conf.d/99-alps-vllm-torch.conf; \
     ldconfig; \
-    APT_CLEANUP_HOLD_PACKAGES=libibverbs1 \
+    APT_CLEANUP_HOLD_PACKAGES="libibverbs1 libibverbs-dev" \
       cleanup_new_apt_build_deps /tmp/vllm-apt-before.txt "${vllm_apt_build_deps[@]}"; \
     rm -rf /tmp/uccl /tmp/uccl-ep-build /tmp/vllm /tmp/vllm-dist /tmp/vllm-build-requirements.txt /tmp/vllm-apt-before.txt /root/.cache/pip
 
@@ -201,8 +200,8 @@ RUN set -eux; \
       echo "${missing}" >&2; \
       exit 1; \
     fi; \
-    if dpkg-query -W -f='${db:Status-Abbrev}' libibverbs-dev 2>/dev/null | grep -q '^ii '; then \
-      echo "FATAL: libibverbs-dev must not remain in the runtime image" >&2; \
+    if ! dpkg-query -W -f='${db:Status-Abbrev}' libibverbs-dev 2>/dev/null | grep -q '^ii '; then \
+      echo "FATAL: the base image's matching libibverbs-dev must remain installed for the Mooncake build" >&2; \
       exit 1; \
     fi; \
     all_missing="$(find "$(python -c 'import vllm; print(vllm.__path__[0])')" -name '*.so' \

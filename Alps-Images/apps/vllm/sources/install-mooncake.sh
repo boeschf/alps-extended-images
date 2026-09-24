@@ -171,6 +171,16 @@ mooncake_apt_build_deps=(
     pkg-config
     python3-dev
 )
+# The CUDA base supplies libibverbs-dev 63 alongside its DOCA/rdma-core
+# runtime, while the configured Ubuntu repositories offer version 50. Keep
+# the matching base package across the vLLM build rather than trying to
+# reinstall an incompatible development package here.
+if [[ "${accel}" == "cuda" ]]; then
+    dpkg-query -W -f='${db:Status-Abbrev}' libibverbs-dev 2>/dev/null \
+        | grep -q '^ii ' \
+        || die "matching CUDA base libibverbs-dev is not installed"
+fi
+
 snapshot_apt_packages /tmp/mooncake-apt-before.txt
 apt_get update
 apt_get install -y --no-install-recommends \
@@ -307,6 +317,12 @@ apt_mark manual "${runtime_pkg_list[@]}"
 rm -f "${runtime_packages}"
 
 cleanup_new_apt_build_deps /tmp/mooncake-apt-before.txt "${mooncake_apt_build_deps[@]}"
+APT_CLEANUP_HOLD_PACKAGES="libibverbs1 ibverbs-providers" \
+    cleanup_apt_build_deps libibverbs-dev
+if dpkg-query -W -f='${db:Status-Abbrev}' libibverbs-dev 2>/dev/null \
+    | grep -q '^ii '; then
+    die "libibverbs-dev remains installed after Mooncake build"
+fi
 ldconfig
 
 # Final verification against the post-cleanup image content.
