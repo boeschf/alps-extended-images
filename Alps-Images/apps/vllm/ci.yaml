@@ -11,6 +11,7 @@ tests:
         SLURM_JOB_NUM_NODES: "2"
         SLURM_NTASKS: "2"
         VLLM_RAY_NCCL_WORLD_SIZE: "8"
+        FI_CXI_ENABLE_WRITEDATA: "1"
     - name: mooncake-cxi
       runner: cuda
       timeout: 15m
@@ -29,6 +30,7 @@ tests:
         SLURM_JOB_NUM_NODES: "2"
         SLURM_NTASKS: "2"
         VLLM_RAY_NCCL_WORLD_SIZE: "8"
+        FI_CXI_ENABLE_WRITEDATA: "1"
     - name: mooncake-cxi
       runner: rocm
       timeout: 15m
