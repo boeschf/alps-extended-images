@@ -70,15 +70,20 @@ RUN set -eux; \
       curl \
       git \
       libdw-dev \
-      libnl-3-dev \
-      libnl-route-3-dev \
       libnuma-dev \
       ninja-build \
       pkg-config \
       rustc \
       python3-dev \
     ); \
-    vllm_apt_install_packages=(ca-certificates libibverbs1 libibverbs-dev "${vllm_apt_build_deps[@]}"); \
+    vllm_apt_install_packages=( \
+      ca-certificates \
+      libibverbs1 \
+      libibverbs-dev \
+      libnl-3-dev \
+      libnl-route-3-dev \
+      "${vllm_apt_build_deps[@]}" \
+    ); \
     snapshot_apt_packages /tmp/vllm-apt-before.txt; \
     apt_get update; \
     apt_get install -y --no-install-recommends "${vllm_apt_install_packages[@]}"; \
