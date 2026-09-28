@@ -138,6 +138,7 @@ RUN set -eux; \
 
 # Mooncake transfer engine (CXI)
 COPY Alps-Images/apps/vllm/sources/install-mooncake.sh /opt/alps/install-mooncake.sh
+COPY Alps-Images/apps/vllm/patches/mooncake /opt/alps/mooncake-patches
 
 RUN set -eux; \
     chmod +x /opt/alps/install-mooncake.sh; \

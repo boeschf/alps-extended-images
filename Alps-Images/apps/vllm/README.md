@@ -14,6 +14,8 @@ Both variants additionally install the [Mooncake](https://github.com/kvcache-ai/
 
 Mooncake is compiled against the libfabric installed by the Alps base image (`/usr`), so it always matches the stack's libfabric version and shares a single in-process libfabric instance with the aws-ofi-nccl NCCL plugin. This is deliberate: a second, bundled libfabric would race for the CXI devices and leave one consumer with an empty provider list.
 
+`patches/mooncake/` fixes CXI device discovery in the Mooncake store client, which otherwise comes up without a transport.
+
 On Slingshot, select the CXI transport in the extra config instead of the default `rdma` protocol, e.g.:
 
 ```bash
@@ -23,4 +25,4 @@ vllm serve <model> \
       "kv_connector_extra_config": {"mooncake_protocol": "cxi"}}'
 ```
 
-`device_name` may be left empty; Mooncake auto-discovers CXI devices. The image also ships the `mooncake_master` store service and the `transfer_engine_bench` utility for transport debugging. A single-node CXI smoke test runs in CI (`mooncake_smoke.sh`).
+`device_name` may be left empty; Mooncake auto-discovers CXI devices. The image also ships the `mooncake_master` store service and the `transfer_engine_bench` utility for transport debugging. A single-node CXI smoke test (`mooncake_smoke.sh`) runs in CI for both the transfer engine and the store.

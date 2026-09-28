@@ -24,12 +24,15 @@
 #                        fetching a bare commit.
 #   LIBFABRIC_PREFIX     Alps libfabric prefix (default: /usr)
 #   MOONCAKE_BUILD_JOBS  parallel build jobs (default: MAX_JOBS, else 32)
+#   MOONCAKE_PATCH_DIR   patches applied on top of MOONCAKE_REF
+#                        (default: /opt/alps/mooncake-patches)
 set -euo pipefail
 
 MOONCAKE_REPO="${MOONCAKE_REPO:-https://github.com/kvcache-ai/Mooncake.git}"
 MOONCAKE_REF="${MOONCAKE_REF:-v0.3.13.post1}"
 LIBFABRIC_PREFIX="${LIBFABRIC_PREFIX:-/usr}"
 MOONCAKE_BUILD_JOBS="${MOONCAKE_BUILD_JOBS:-${MAX_JOBS:-32}}"
+MOONCAKE_PATCH_DIR="${MOONCAKE_PATCH_DIR:-/opt/alps/mooncake-patches}"
 ALPS_PACKAGE_HELPERS="${ALPS_PACKAGE_HELPERS:-/opt/alps/package-helpers.sh}"
 
 accel="${1:-}"
@@ -203,6 +206,17 @@ else
 fi
 git -C "${src_dir}" submodule update --init --recursive
 
+[[ -d "${MOONCAKE_PATCH_DIR}" ]] \
+    || die "missing ${MOONCAKE_PATCH_DIR}; the app Containerfile must COPY it"
+shopt -s nullglob
+mooncake_patch_files=("${MOONCAKE_PATCH_DIR}"/*.patch)
+shopt -u nullglob
+for patch_file in "${mooncake_patch_files[@]}"; do
+    echo "Applying Mooncake patch: ${patch_file}"
+    git -C "${src_dir}" apply --check "${patch_file}"
+    git -C "${src_dir}" apply --verbose "${patch_file}"
+done
+
 cmake -S "${src_dir}" -B "${build_dir}" "${cmake_args[@]}"
 cmake --build "${build_dir}" -j"${MOONCAKE_BUILD_JOBS}"
 if [[ -n "${created_ibverbs_link}" ]]; then
@@ -243,6 +257,10 @@ if [[ -f "${build_dir}/mooncake-transfer-engine/nvlink-allocator/nvlink_allocato
         "${wheel_pkg_dir}/nvlink_allocator.so"
     cp "${src_dir}/mooncake-integration/allocator.py" "${wheel_pkg_dir}/allocator.py"
 fi
+
+# Assert patch 0001 was compiled into store.so.
+grep -aq "Topology discovery complete for CXI" "${wheel_pkg_dir}/store.so" \
+    || die "store.so lacks the CXI topology-discovery patch (${MOONCAKE_PATCH_DIR}/0001-*)"
 
 # The build-tree artifacts resolve wheel-internal libraries (libasio.so) via
 # build paths; pin them to $ORIGIN so they resolve next to the installed
