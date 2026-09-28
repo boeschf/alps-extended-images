@@ -7,6 +7,7 @@ set -euo pipefail
 # 2. initializes a TransferEngine with the "cxi" protocol
 # 3. runs a host-memory self-transfer through the CXI transport
 # 4. runs a device-memory self-transfer when a GPU is visible
+# 5. runs a Store put/get against a local mooncake_master
 #
 # A single Slurm task is enough: the engine uses P2PHANDSHAKE metadata and
 # targets itself, so no second node or metadata server is required.
@@ -94,5 +95,100 @@ if torch is not None and torch.cuda.is_available():
 else:
     print("no CUDA/HIP device visible; skipped device-memory transfer")
 
-print("OK: mooncake CXI smoke test passed")
+print("OK: mooncake CXI TransferEngine checks passed")
 PY
+
+# Store setup() returns 0 even if the CXI transport failed; also scan the log.
+tmp="$(mktemp -d)"
+master_pid=""
+cleanup() {
+    [ -n "${master_pid}" ] && kill "${master_pid}" 2>/dev/null || true
+    rm -rf "${tmp}"
+}
+trap cleanup EXIT
+
+export MC_SMOKE_RPC_PORT="${MC_SMOKE_RPC_PORT:-50151}"
+MC_SMOKE_METRICS_PORT="${MC_SMOKE_METRICS_PORT:-9103}"
+master_bin="$(python -c 'import mooncake, os; print(os.path.join(os.path.dirname(mooncake.__file__), "mooncake_master"))')"
+
+"${master_bin}" --rpc_port="${MC_SMOKE_RPC_PORT}" --metrics_port="${MC_SMOKE_METRICS_PORT}" \
+    --logtostderr > "${tmp}/master.log" 2>&1 &
+master_pid=$!
+
+if ! python - <<'PY'
+import os, socket, sys, time
+port = int(os.environ["MC_SMOKE_RPC_PORT"])
+deadline = time.time() + 30
+while time.time() < deadline:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        sys.exit(0)
+    except OSError:
+        time.sleep(0.5)
+sys.exit(f"mooncake_master did not listen on 127.0.0.1:{port} within 30s")
+PY
+then
+    cat "${tmp}/master.log" >&2
+    exit 1
+fi
+echo "mooncake_master up on 127.0.0.1:${MC_SMOKE_RPC_PORT}"
+
+python - <<'PY' 2>&1 | tee "${tmp}/store.log"
+import os
+import socket
+import sys
+
+try:
+    import torch  # noqa: F401  (vLLM's import order)
+except ImportError:
+    pass
+
+from mooncake.store import MooncakeDistributedStore
+
+
+def get_ip():
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))  # TEST-NET-1, never contacted
+            return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+store = MooncakeDistributedStore()
+ret = store.setup(
+    get_ip(),
+    "P2PHANDSHAKE",
+    64 * 1024 * 1024,   # global_segment_size
+    16 * 1024 * 1024,   # local_buffer_size
+    "cxi",
+    "",
+    f"127.0.0.1:{os.environ['MC_SMOKE_RPC_PORT']}",
+)
+if ret != 0:
+    sys.exit(f"mooncake Store setup(protocol=cxi) failed with code {ret}")
+
+value = bytes(range(256)) * 4096  # 1 MiB
+ret = store.put("mooncake-smoke-key", value)
+if ret != 0:
+    sys.exit(f"mooncake Store put failed with code {ret}")
+got = store.get("mooncake-smoke-key")
+if got != value:
+    sys.exit(f"mooncake Store get returned {len(got)} bytes, expected the 1 MiB value")
+print("mooncake Store put/get over CXI ok (1 MiB)")
+store.close()
+PY
+
+if grep -E 'cxi_transport_install_failed|No available CXI devices|cannot initialize CXI resources|Failed to install CXI transport' \
+        "${tmp}/store.log"; then
+    echo "FAIL: CXI transport did not come up in the Store client (lines above)" >&2
+    exit 1
+fi
+
+echo "OK: mooncake CXI smoke test passed"
