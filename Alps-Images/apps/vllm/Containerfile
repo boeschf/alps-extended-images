@@ -28,7 +28,6 @@ ARG UCCL_NUM_LOCAL_GPUS="4"
 ARG UCCL_MAX_JOBS="16"
 ARG MODEL_STREAMER_REPO="https://github.com/dsx-ai-factory/model-streamer"
 ARG MODEL_STREAMER_VERSION="0.16.1"
-ARG VLLM_NIXL_VERSION="1.4.1"
 ARG VLLM_TARGET_DEVICE="cuda"
 ARG VLLM_CUDA_ARCH_LIST="9.0"
 ARG VLLM_TORCH_CUDA_ARCH_LIST="9.0"
@@ -36,8 +35,7 @@ ARG VLLM_VERSION_OVERRIDE=""
 ARG MAX_JOBS="16"
 ARG NVCC_THREADS="4"
 LABEL org.opencontainers.image.uccl.revision="${UCCL_COMMIT}" \
-      org.opencontainers.image.runai-model-streamer.version="${MODEL_STREAMER_VERSION}" \
-      org.opencontainers.image.nixl.version="${VLLM_NIXL_VERSION}"
+      org.opencontainers.image.runai-model-streamer.version="${MODEL_STREAMER_VERSION}"
 
 ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     CUDA_ARCH_LIST="${VLLM_CUDA_ARCH_LIST}" \
@@ -45,7 +43,6 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     MAX_JOBS="${MAX_JOBS}" \
     NVCC_THREADS="${NVCC_THREADS}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
-    NIXL_VERSION="${VLLM_NIXL_VERSION}" \
     PYTHONNOUSERSITE="1" \
     CCACHE_NOHASHDIR="true" \
     UCCL_EP_TRANSPORT="cxi" \
@@ -158,15 +155,11 @@ RUN set -eux; \
     pip_install python --no-cache-dir -r requirements/cuda-alps.txt; \
     python setup.py bdist_wheel --dist-dir /tmp/vllm-dist --py-limited-api=cp38; \
     pip_install python --no-cache-dir --no-deps /tmp/vllm-dist/*.whl; \
-    pip_install python --no-cache-dir "nixl==${VLLM_NIXL_VERSION}" "ray[default]" sentencepiece tiktoken; \
+    pip_install python --no-cache-dir "ray[default]" sentencepiece tiktoken; \
     arch="$(uname -m)"; \
     pip_install python --no-cache-dir \
       "${MODEL_STREAMER_REPO}/releases/download/${MODEL_STREAMER_VERSION}/runai_model_streamer-${MODEL_STREAMER_VERSION}-py3-none-manylinux2014_${arch}.whl"; \
-    nixl_site_packages="$(python -c 'import site; print(site.getsitepackages()[0])')"; \
-    echo "Disabling NIXL-EP: its bundled UCX crashes during process teardown on GH200"; \
-    rm -rf "${nixl_site_packages}/nixl_ep" \
-      "${nixl_site_packages}/nixl_ep_cu12" \
-      "${nixl_site_packages}/nixl_ep_cu13"; \
+    python -m pip uninstall -y nixl nixl-cu12 nixl-cu13; \
     torch_lib_dir="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"; \
     test -d "${torch_lib_dir}"; \
     printf '%s\n' "${torch_lib_dir}" > /etc/ld.so.conf.d/99-alps-vllm-torch.conf; \
@@ -190,8 +183,7 @@ RUN set -eux; \
     python -c 'import uccl.ep; import deep_ep; print("uccl.ep={} deep_ep={}".format(uccl.ep.__file__, deep_ep.__file__))'; \
     python -c 'import flashinfer; print("flashinfer={}".format(flashinfer.__version__))'; \
     python -c 'import importlib.metadata as m; import runai_model_streamer; print("runai-model-streamer={} {}".format(m.version("runai-model-streamer"), runai_model_streamer.__file__))'; \
-    python -c 'import importlib.metadata as m, sys; expected = sys.argv[1]; actual = m.version("nixl"); assert actual == expected, f"nixl: expected {expected}, got {actual}"; print(f"nixl={actual}")' "${NIXL_VERSION}"; \
-    python -c 'import importlib.util; assert importlib.util.find_spec("nixl_ep") is None, "crashing NIXL-EP package must remain disabled"; import nixl; print("nixl_core={}".format(nixl.__file__))'; \
+    python -c 'import importlib.util; assert importlib.util.find_spec("nixl") is None, "NIXL must not be installed"; print("nixl=absent")'; \
     cubin_dir="$(python -c 'from flashinfer.jit.env import FLASHINFER_CUBIN_DIR; print(FLASHINFER_CUBIN_DIR)')"; \
     echo "INFO: flashinfer resolves cubins from ${cubin_dir}"; \
     cubin_count="$(find "${cubin_dir}" -name '*.cubin' 2>/dev/null | wc -l)"; \
