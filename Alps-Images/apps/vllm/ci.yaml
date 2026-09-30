@@ -2,6 +2,11 @@ tests:
   cuda:
     - name: vetnode
       kind: cuda-vetnode
+    - name: model-imports
+      runner: cuda
+      timeout: 10m
+      script:
+        - /opt/tests/vllm/model_import_smoke.sh
     - name: ray-nccl-uccl-ep
       runner: cuda
       timeout: 30m
@@ -21,6 +26,11 @@ tests:
         SLURM_JOB_NUM_NODES: "1"
         SLURM_NTASKS: "1"
   rocm:
+    - name: model-imports
+      runner: rocm
+      timeout: 10m
+      script:
+        - /opt/tests/vllm/model_import_smoke.sh
     - name: ray-rccl-uccl-ep
       runner: rocm
       timeout: 30m

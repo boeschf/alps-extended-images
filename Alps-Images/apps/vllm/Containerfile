@@ -162,6 +162,11 @@ RUN set -eux; \
     arch="$(uname -m)"; \
     pip_install python --no-cache-dir \
       "${MODEL_STREAMER_REPO}/releases/download/${MODEL_STREAMER_VERSION}/runai_model_streamer-${MODEL_STREAMER_VERSION}-py3-none-manylinux2014_${arch}.whl"; \
+    nixl_site_packages="$(python -c 'import site; print(site.getsitepackages()[0])')"; \
+    echo "Disabling NIXL-EP: its bundled UCX crashes during process teardown on GH200"; \
+    rm -rf "${nixl_site_packages}/nixl_ep" \
+      "${nixl_site_packages}/nixl_ep_cu12" \
+      "${nixl_site_packages}/nixl_ep_cu13"; \
     torch_lib_dir="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"; \
     test -d "${torch_lib_dir}"; \
     printf '%s\n' "${torch_lib_dir}" > /etc/ld.so.conf.d/99-alps-vllm-torch.conf; \
@@ -178,10 +183,15 @@ RUN set -eux; \
       test "${actual}" = "${expected}"; \
     done < /opt/alps/vllm-base-pins.txt; \
     python -c 'import torch, vllm; print("torch={} cuda={}".format(torch.__version__, torch.version.cuda)); print("vllm={}".format(getattr(vllm, "__version__", "unknown")))'; \
+    python -c 'import vllm.models.deepseek_v32; print("deepseek_v32=clean")'; \
+    python -c 'from vllm.model_executor.models.registry import ModelRegistry; print("supported_archs={}".format(len(ModelRegistry.get_supported_archs()))); info = ModelRegistry.models["DeepseekV32ForCausalLM"].inspect_model_cls(); print("DeepseekV32ForCausalLM={}".format(info))'; \
+    python -c 'from vllm.utils.import_utils import import_triton_kernels; import_triton_kernels(); from triton_kernels.matmul_ogs import PrecisionConfig; print("triton_kernels.matmul_ogs={}".format(PrecisionConfig))'; \
+    python -c 'import importlib.util; from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import is_available; available = is_available(); assert importlib.util.find_spec("quack") is not None or not available, "ll_bf16 must be disabled without quack"; print("ll_bf16_available={}".format(available))'; \
     python -c 'import uccl.ep; import deep_ep; print("uccl.ep={} deep_ep={}".format(uccl.ep.__file__, deep_ep.__file__))'; \
     python -c 'import flashinfer; print("flashinfer={}".format(flashinfer.__version__))'; \
     python -c 'import importlib.metadata as m; import runai_model_streamer; print("runai-model-streamer={} {}".format(m.version("runai-model-streamer"), runai_model_streamer.__file__))'; \
     python -c 'import importlib.metadata as m, sys; expected = sys.argv[1]; actual = m.version("nixl"); assert actual == expected, f"nixl: expected {expected}, got {actual}"; print(f"nixl={actual}")' "${NIXL_VERSION}"; \
+    python -c 'import importlib.util; assert importlib.util.find_spec("nixl_ep") is None, "crashing NIXL-EP package must remain disabled"; import nixl; print("nixl_core={}".format(nixl.__file__))'; \
     cubin_dir="$(python -c 'from flashinfer.jit.env import FLASHINFER_CUBIN_DIR; print(FLASHINFER_CUBIN_DIR)')"; \
     echo "INFO: flashinfer resolves cubins from ${cubin_dir}"; \
     cubin_count="$(find "${cubin_dir}" -name '*.cubin' 2>/dev/null | wc -l)"; \

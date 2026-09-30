@@ -198,6 +198,9 @@ RUN set -eux; \
     if [ -n "${expected_vllm_version}" ]; then test "${vllm_version}" = "${expected_vllm_version}"; fi; \
     python -c 'import importlib.metadata as m; print("amd-aiter={}".format(m.version("amd-aiter")))'; \
     python -c 'import torch; print("torch={} hip={}".format(torch.__version__, torch.version.hip))'; \
+    python -c 'import vllm.models.deepseek_v32; print("deepseek_v32=clean")'; \
+    python -c 'from vllm.model_executor.models.registry import ModelRegistry; print("supported_archs={}".format(len(ModelRegistry.get_supported_archs()))); info = ModelRegistry.models["DeepseekV32ForCausalLM"].inspect_model_cls(); print("DeepseekV32ForCausalLM={}".format(info))'; \
+    python -c 'from vllm.utils.import_utils import import_triton_kernels; import_triton_kernels(); from triton_kernels.matmul_ogs import PrecisionConfig; print("triton_kernels.matmul_ogs={}".format(PrecisionConfig))'; \
     python -c 'import uccl.ep; import deep_ep; print("uccl.ep={} deep_ep={}".format(uccl.ep.__file__, deep_ep.__file__))'; \
     python -m pip check || echo "WARN: inconsistent pip dependency resolution (see above)"; \
     vllm_dir="$(python -c 'import importlib.util; spec = importlib.util.find_spec("vllm"); print(spec.submodule_search_locations[0] if spec else "")')"; \
