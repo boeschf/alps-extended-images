@@ -43,6 +43,7 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
     PYTHONNOUSERSITE="1" \
     LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64" \
+    TVM_FFI_CACHE_DIR="/opt/alps/tvm-ffi" \
     UCCL_EP_TRANSPORT="cxi" \
     UCCL_SOCKET_IFNAME="hsn"
 
@@ -176,6 +177,15 @@ RUN set -eux; \
     # hip-lang package in the Alps compat layout at /opt/rocm.
     env -u ROCM_PATH -u HIP_PATH python setup.py develop; \
     pip_install python --no-cache-dir "ray[default]" sentencepiece tiktoken; \
+    tvm_ffi_torch_version="$(python -c 'import torch; print("".join(torch.__version__.split(".")[:2]))')"; \
+    tvm_ffi_addon="${TVM_FFI_CACHE_DIR}/libtorch_c_dlpack_addon_torch${tvm_ffi_torch_version}-rocm.so"; \
+    TVM_FFI_DISABLE_TORCH_C_DLPACK=1 \
+      python -m tvm_ffi.utils._build_optional_torch_c_dlpack \
+        --output-dir "${TVM_FFI_CACHE_DIR}" \
+        --libname "$(basename "${tvm_ffi_addon}")" \
+        --build-with-rocm; \
+    test -s "${tvm_ffi_addon}"; \
+    chmod -R a+rX "${TVM_FFI_CACHE_DIR}"; \
     torch_lib_dir="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')"; \
     test -d "${torch_lib_dir}"; \
     printf '%s\n' "${torch_lib_dir}" > /etc/ld.so.conf.d/99-alps-vllm-torch.conf; \
@@ -199,6 +209,7 @@ RUN set -eux; \
     python -c 'import importlib.metadata as m; print("amd-aiter={}".format(m.version("amd-aiter")))'; \
     python -c 'import torch; print("torch={} hip={}".format(torch.__version__, torch.version.hip))'; \
     python -c 'import uccl.ep; import deep_ep; print("uccl.ep={} deep_ep={}".format(uccl.ep.__file__, deep_ep.__file__))'; \
+    python -c 'import os; path = os.path.join(os.environ["TVM_FFI_CACHE_DIR"], "libtorch_c_dlpack_addon_torch{}-rocm.so".format("".join(__import__("torch").__version__.split(".")[:2]))); assert os.path.isfile(path), path; print("tvm_ffi_rocm_addon={}".format(path))'; \
     python -m pip check || echo "WARN: inconsistent pip dependency resolution (see above)"; \
     vllm_dir="$(python -c 'import importlib.util; spec = importlib.util.find_spec("vllm"); print(spec.submodule_search_locations[0] if spec else "")')"; \
     if [ -z "${vllm_dir}" ]; then \
