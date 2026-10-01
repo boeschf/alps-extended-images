@@ -1308,9 +1308,13 @@ build_ompi5() {
 }
 
 build_aws_ofi_rccl() {
-    local cppflags="${CPPFLAGS:-}"
     local ldflags="${LDFLAGS:-}"
     local prefix libdir rocm_configure_prefix="" test_obj
+    local -a cppflags=()
+
+    if [[ -n "${CPPFLAGS:-}" ]]; then
+        read -r -a cppflags <<< "${CPPFLAGS}"
+    fi
 
     for prefix in \
         "${ROCM_BUILD_PREFIX}" \
@@ -1323,7 +1327,7 @@ build_aws_ofi_rccl() {
         "${RCCL_PREFIX:-}"; do
         [[ -n "${prefix}" ]] || continue
         if [[ -d "${prefix}/include" ]]; then
-            cppflags="-I${prefix}/include ${cppflags}"
+            cppflags=("-I${prefix}/include" "${cppflags[@]}")
         fi
         for libdir in "${prefix}/lib" "${prefix}/lib64"; do
             if [[ -d "${libdir}" ]]; then
@@ -1332,7 +1336,7 @@ build_aws_ofi_rccl() {
         done
     done
 
-    cppflags="-D__HIP_PLATFORM_AMD__=1 ${cppflags}"
+    cppflags=(-D__HIP_PLATFORM_AMD__=1 "${cppflags[@]}")
     for prefix in \
         "${ROCM_BUILD_PREFIX}" \
         "${ROCM_DEVEL_PREFIX:-}" \
@@ -1343,7 +1347,7 @@ build_aws_ofi_rccl() {
         [[ -f "${prefix}/include/hip/hip_runtime_api.h" ]] || continue
         test_obj="$(mktemp /tmp/hip-runtime-api-check.XXXXXX.o)"
         if printf '%s\n' '#include <hip/hip_runtime_api.h>' \
-            | g++ ${cppflags} -std=c++17 -x c++ -c -o "${test_obj}" -; then
+            | g++ "${cppflags[@]}" -std=c++17 -x c++ -c -o "${test_obj}" -; then
             rocm_configure_prefix="${prefix}"
             rm -f "${test_obj}"
             break
@@ -1355,7 +1359,7 @@ build_aws_ofi_rccl() {
 
     # aws-ofi's configure probe does not reliably find HIP headers in ROCm
     # wheel SDK prefixes, so compile-test the header above and seed the cache.
-    CPPFLAGS="${cppflags}" \
+    CPPFLAGS="${cppflags[*]}" \
     LDFLAGS="${ldflags}" \
     ac_cv_header_hip_hip_runtime_api_h=yes \
     build_aws_ofi_nccl_common \

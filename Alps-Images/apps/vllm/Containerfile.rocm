@@ -158,8 +158,6 @@ RUN set -eux; \
     git submodule update --init --recursive; \
     if [ -z "${VLLM_VERSION_OVERRIDE}" ] && [[ "${VLLM_REF}" == v[0-9]* ]]; then \
       export VLLM_VERSION_OVERRIDE="${VLLM_REF#v}"; \
-    elif [ -n "${VLLM_VERSION_OVERRIDE}" ]; then \
-      export VLLM_VERSION_OVERRIDE; \
     fi; \
     shopt -s nullglob; \
     vllm_patch_files=(/opt/alps-vllm-patches/*.patch /opt/alps-vllm-patches/vllm/*.patch); \
@@ -175,7 +173,11 @@ RUN set -eux; \
     # -x hip compiles), so the build drops both. ROCM_HOME is kept: torch uses it to
     # pass -DROCM_PATH to the cmake configure so enable_language(HIP) finds the
     # hip-lang package in the Alps compat layout at /opt/rocm.
-    env -u ROCM_PATH -u HIP_PATH python setup.py develop; \
+    rm -rf /tmp/vllm-dist; \
+    mkdir -p /tmp/vllm-dist; \
+    env -u ROCM_PATH -u HIP_PATH \
+      python setup.py bdist_wheel --dist-dir /tmp/vllm-dist; \
+    pip_install python --no-cache-dir --no-deps /tmp/vllm-dist/*.whl; \
     pip_install python --no-cache-dir "ray[default]" sentencepiece tiktoken; \
     tvm_ffi_torch_version="$(python -c 'import torch; print("".join(torch.__version__.split(".")[:2]))')"; \
     tvm_ffi_addon="${TVM_FFI_CACHE_DIR}/libtorch_c_dlpack_addon_torch${tvm_ffi_torch_version}-rocm.so"; \
@@ -192,7 +194,7 @@ RUN set -eux; \
     ldconfig; \
     APT_CLEANUP_HOLD_PACKAGES=libibverbs1 \
       cleanup_new_apt_build_deps /tmp/vllm-apt-before.txt "${vllm_apt_build_deps[@]}"; \
-    rm -rf /opt/aiter /tmp/aiter-dist /opt/uccl /tmp/uccl-ep-build /tmp/vllm-apt-before.txt /root/.cache/pip
+    rm -rf /opt/aiter /tmp/aiter-dist /opt/uccl /tmp/uccl-ep-build /opt/vllm /tmp/vllm-dist /tmp/vllm-apt-before.txt /root/.cache/pip
 
 RUN set -eux; \
     while IFS= read -r pin; do \

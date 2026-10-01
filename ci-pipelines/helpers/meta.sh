@@ -534,8 +534,10 @@ write_base_build_env() {
       "STABLE_IMAGE_REF=$stable_image_ref" \
       "TESTED_IMAGE_REF=$tested_image_ref" \
       "VALIDATION_HASH=$validation_hash_value" \
-      "BASE_IMAGE=$base_image_ref" \
-      "$family_variant_dir"
+      "BASE_IMAGE=$base_image_ref"
+    if [[ -n "$family_variant_dir" ]]; then
+      printf '%s\n' "$family_variant_dir"
+    fi
     printf '%s\n' "$family_dotenv"
     # shellcheck source=Alps-Images/common/alps-stack-versions.env
     source Alps-Images/common/alps-stack-versions.env
@@ -546,7 +548,7 @@ write_base_build_env() {
       "OCI_DESCRIPTION=$image_description" \
       "CSCS_ALPS_GIT_COMMIT_SHORT=${CI_COMMIT_SHORT_SHA}" \
       "GHCR_STABLE_IMAGE_REF=${GHCR_IMAGE_PREFIX}${stable_image_ref#"$IMAGE_PREFIX"}"
-  } | sed '/^$/d' > "$output_file"
+  } > "$output_file"
 }
 
 write_app_build_env() {

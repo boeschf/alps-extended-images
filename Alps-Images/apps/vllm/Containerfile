@@ -86,7 +86,6 @@ RUN set -eux; \
     apt_get install -y --no-install-recommends "${vllm_apt_install_packages[@]}"; \
     rm -rf /var/lib/apt/lists/*; \
     pip_install python --no-cache-dir --upgrade \
-      grep \
       build \
       jinja2 \
       'packaging<=25.0' \
@@ -144,8 +143,6 @@ RUN set -eux; \
     python use_existing_torch.py --prefix || python use_existing_torch.py; \
     if [ -z "${VLLM_VERSION_OVERRIDE}" ] && [[ "${VLLM_REF}" == v[0-9]* ]]; then \
       export VLLM_VERSION_OVERRIDE="${VLLM_REF#v}"; \
-    elif [ -n "${VLLM_VERSION_OVERRIDE}" ]; then \
-      export VLLM_VERSION_OVERRIDE; \
     fi; \
     build_requirements="requirements/build/cuda.txt"; \
     if [ ! -f "${build_requirements}" ]; then build_requirements="requirements/build.txt"; fi; \
