@@ -151,7 +151,7 @@ RUN set -eux; \
     if [ ! -f "${build_requirements}" ]; then build_requirements="requirements/build.txt"; fi; \
     awk 'BEGIN { IGNORECASE=1 } !($0 ~ /^torch==/ || $0 ~ /^torchaudio==/ || $0 ~ /^torchvision==/) { print }' "${build_requirements}" > /tmp/vllm-build-requirements.txt; \
     pip_install python --no-cache-dir -r /tmp/vllm-build-requirements.txt; \
-    awk 'BEGIN { IGNORECASE=1 } !($0 ~ /^torch==/ || $0 ~ /^torchaudio==/ || $0 ~ /^torchvision==/ || $0 ~ /^cuda-toolkit/ || $0 ~ /^humming-kernels/ || $0 ~ /^nvidia-cuda-/ || $0 ~ /^nvidia-cudnn-frontend/ || $0 ~ /^nvidia-cutlass-dsl/ || $0 ~ /^nvidia-nvjitlink/ || $0 ~ /^nvidia-nvvm/ || $0 ~ /^quack-kernels/ || $0 ~ /^tokenspeed-mla/) { print }' requirements/cuda.txt > requirements/cuda-alps.txt; \
+    awk 'BEGIN { IGNORECASE=1 } !($0 ~ /^torch==/ || $0 ~ /^torchaudio==/ || $0 ~ /^torchvision==/ || $0 ~ /^cuda-toolkit/ || $0 ~ /^humming-kernels/ || $0 ~ /^nvidia-cuda-/ || $0 ~ /^nvidia-cudnn-frontend/ || $0 ~ /^nvidia-nvjitlink/ || $0 ~ /^nvidia-nvvm/ || $0 ~ /^tokenspeed-mla/) { print }' requirements/cuda.txt > requirements/cuda-alps.txt; \
     pip_install python --no-cache-dir -r requirements/cuda-alps.txt; \
     python setup.py bdist_wheel --dist-dir /tmp/vllm-dist --py-limited-api=cp38; \
     pip_install python --no-cache-dir --no-deps /tmp/vllm-dist/*.whl; \
@@ -179,7 +179,7 @@ RUN set -eux; \
     python -c 'import vllm.models.deepseek_v32; print("deepseek_v32=clean")'; \
     python -c 'from vllm.model_executor.models.registry import ModelRegistry; print("supported_archs={}".format(len(ModelRegistry.get_supported_archs()))); info = ModelRegistry.models["DeepseekV32ForCausalLM"].inspect_model_cls(); print("DeepseekV32ForCausalLM={}".format(info))'; \
     python -c 'from vllm.utils.import_utils import import_triton_kernels; import_triton_kernels(); from triton_kernels.matmul_ogs import PrecisionConfig; print("triton_kernels.matmul_ogs={}".format(PrecisionConfig))'; \
-    python -c 'import importlib.util; from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import is_available; available = is_available(); assert importlib.util.find_spec("quack") is not None or not available, "ll_bf16 must be disabled without quack"; print("ll_bf16_available={}".format(available))'; \
+    python -c 'import importlib.metadata as m; import cutlass.cute, quack; from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import is_available; cutlass_version = m.version("nvidia-cutlass-dsl"); quack_version = m.version("quack-kernels"); assert cutlass_version == "4.7.1", cutlass_version; assert quack_version == "0.6.5", quack_version; assert is_available(), "ll_bf16 must be enabled"; print("nvidia-cutlass-dsl={} quack-kernels={} ll_bf16_available=True".format(cutlass_version, quack_version))'; \
     python -c 'import uccl.ep; import deep_ep; print("uccl.ep={} deep_ep={}".format(uccl.ep.__file__, deep_ep.__file__))'; \
     python -c 'import flashinfer; print("flashinfer={}".format(flashinfer.__version__))'; \
     python -c 'import importlib.metadata as m; import runai_model_streamer; print("runai-model-streamer={} {}".format(m.version("runai-model-streamer"), runai_model_streamer.__file__))'; \
