@@ -182,8 +182,8 @@ mooncake_apt_build_deps=(
 )
 # The CUDA base supplies an RDMA development package set at version 63
 # alongside its DOCA/rdma-core runtime, while the configured Ubuntu
-# repositories offer version 50. Keep the matching base packages across the
-# vLLM build rather than trying to reinstall incompatible versions here.
+# repositories offer version 50. Keep the matching base packages until Mooncake
+# finishes building, then remove the development packages from the final image.
 if [[ "${accel}" == "cuda" ]]; then
     for pkg in "${ibverbs_apt_build_deps[@]}"; do
         dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null \
@@ -321,9 +321,9 @@ libfabric_needed="$({ ldd "${mooncake_pkg_dir}/engine.so" 2>/dev/null || true; }
     || die "mooncake engine.so does not link libfabric; USE_CXI build is broken"
 echo "INFO: mooncake engine links ${libfabric_needed}"
 
-# Mark dpkg-owned runtime libraries of the installed modules as manual so the
-# autoremove below keeps them. Resolve owners by soname, not by ldd's
-# resolved path (/lib vs /usr/lib trips dpkg -S on merged-/usr systems).
+# Mark dpkg-owned runtime libraries of the installed modules as manual so
+# subsequent package operations retain them. Resolve owners by soname, not by
+# ldd's resolved path (/lib vs /usr/lib trips dpkg -S on merged-/usr systems).
 mapfile -t mooncake_elf_files < <(
     find "${mooncake_pkg_dir}" -type f \
         \( -name '*.so' -o -name 'mooncake_master' -o -name 'mooncake_client' \
@@ -346,20 +346,17 @@ echo "INFO: keeping mooncake runtime library packages: ${runtime_pkg_list[*]}"
 apt_mark manual "${runtime_pkg_list[@]}"
 rm -f "${runtime_packages}"
 
-# Preserve pre-existing RDMA development packages as well as runtime libraries.
-# Only packages installed by this build may be removed, including on CUDA bases
-# whose matching DOCA development packages cannot be reinstalled from Ubuntu.
-ibverbs_hold_packages="libibverbs1 ibverbs-providers libnl-3-200 libnl-route-3-200"
-for pkg in "${ibverbs_apt_build_deps[@]}"; do
-    if grep -Fxq "${pkg}" /tmp/mooncake-apt-before.txt; then
-        ibverbs_hold_packages+=" ${pkg}"
+# Remove newly installed build tools plus the RDMA development packages even
+# when inherited from the base. Refuse collateral removals and avoid autoremove;
+# the runtime packages marked above must remain in the final image.
+mooncake_cleanup_packages=("${ibverbs_apt_build_deps[@]}")
+for pkg in "${mooncake_apt_build_deps[@]}"; do
+    if ! grep -Fxq "${pkg}" /tmp/mooncake-apt-before.txt; then
+        mooncake_cleanup_packages+=("${pkg}")
     fi
 done
-APT_CLEANUP_HOLD_PACKAGES="${ibverbs_hold_packages}" \
-    cleanup_new_apt_build_deps /tmp/mooncake-apt-before.txt \
-        "${mooncake_apt_build_deps[@]}" "${ibverbs_apt_build_deps[@]}"
+purge_apt_build_deps_exact "${mooncake_cleanup_packages[@]}"
 for pkg in "${ibverbs_apt_build_deps[@]}"; do
-    grep -Fxq "${pkg}" /tmp/mooncake-apt-before.txt && continue
     if dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null \
         | grep -q '^ii '; then
         die "${pkg} remains installed after Mooncake build"

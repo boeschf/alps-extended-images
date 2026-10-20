@@ -591,3 +591,54 @@ def test_rocm_sdk_refuses_mismatched_preinstalled_wheels(tmp_path, mismatch):
     result = run_bash(source_rocm("install_rocm_sdk_wheels"), env=env, check=False)
     assert result.returncode != 0
     assert f"Incompatible {mismatch}: installed 7.13.0, expected ROCm 7.14.0" in result.stderr
+
+
+def test_exact_build_package_purge_refuses_reverse_dependency_removal(tmp_path):
+    import shutil
+
+    apt_get = shutil.which("apt-get")
+    if apt_get is None:
+        pytest.skip("requires the real APT dependency solver")
+    status = tmp_path / "status"
+    status.write_text(
+        "\n".join(
+            f"Package: {name}\nStatus: install ok installed\n"
+            "Architecture: all\nVersion: 1.0\n"
+            f"{dependencies}Description: isolated cleanup regression fixture\n"
+            for name, dependencies in (
+                ("libibverbs1", ""),
+                ("libibverbs-dev", "Depends: libibverbs1\n"),
+                ("doca-base", "Depends: libibverbs-dev\n"),
+            )
+        )
+    )
+    result = run_bash(
+        r'''
+source Alps-Images/common/package-helpers.sh
+apt_get() {
+    if [[ " $* " != *" --simulate "* ]]; then
+        echo "Unexpected attempt to mutate packages" >&2
+        return 99
+    fi
+    "$REAL_APT_GET" \
+        -o Debug::NoLocking=1 \
+        -o Dir::State::status="$STATUS_FILE" \
+        -o Dir::State::extended_states="$STATE_FILE" \
+        -o Dir::Cache::pkgcache= \
+        -o Dir::Cache::srcpkgcache= \
+        -o Dir::Etc::sourcelist=/dev/null \
+        -o Dir::Etc::sourceparts=- \
+        "$@"
+}
+purge_apt_build_deps_exact libibverbs-dev
+''',
+        env={
+            "REAL_APT_GET": apt_get,
+            "STATUS_FILE": str(status),
+            "STATE_FILE": str(tmp_path / "extended_states"),
+        },
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "refusing build-package purge that also removes doca-base" in result.stderr
+    assert "Unexpected attempt to mutate packages" not in result.stderr
