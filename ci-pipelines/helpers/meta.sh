@@ -538,7 +538,9 @@ write_base_build_env() {
     if [[ -n "$family_variant_dir" ]]; then
       printf '%s\n' "$family_variant_dir"
     fi
-    printf '%s\n' "$family_dotenv"
+    if [[ -n "$family_dotenv" ]]; then
+      printf '%s\n' "$family_dotenv"
+    fi
     # shellcheck source=Alps-Images/common/alps-stack-versions.env
     source Alps-Images/common/alps-stack-versions.env
     vars_blob "BOOST_VER BOOST_BUILD_JOBS ALPS_BUILD_JOBS ALPS_CMAKE_BUILD_JOBS XPMEM_REF CASSINI_HEADERS_VERSION CXI_DRIVER_VERSION LIBCXI_VERSION LIBFABRIC_COMMIT LIBFABRIC_PATCH UCX_VERSION UCC_VERSION OMPI_VER AWS_OFI_NCCL_REPO AWS_OFI_NCCL_COMMIT AWS_OFI_NCCL_PATCH OSU_VERSION"

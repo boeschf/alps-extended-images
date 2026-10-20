@@ -19,7 +19,8 @@ cat >> "${runtime_env}" <<'EOF'
 # with P2P enabled under the Sarus suite (podman runtime). Detect the runtime at
 # container start instead of baking the workaround in unconditionally:
 # - Podman-based runtimes (Sarus suite, plain podman) create /run/.containerenv.
-# - Enroot does not, so only there the default disables RCCL P2P.
+# - Enroot does not. This is a heuristic, not positive enroot detection:
+#   any other runtime without /run/.containerenv also defaults to disabled P2P.
 # Users can still override by exporting NCCL_P2P_DISABLE (any value, including empty)
 # before the runtime env loads; defvar semantics keep pre-set values untouched.
 if [ ! -f /run/.containerenv ]; then

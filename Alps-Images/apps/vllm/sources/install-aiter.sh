@@ -11,6 +11,7 @@
 #   AITER_REF           tag or branch to clone (required)
 #   AITER_COMMIT        exact commit expected for AITER_REF (required)
 #   GPU_ARCHS           semicolon-separated gfx targets (required)
+#   CU_NUM              target compute units (default: 228 for MI300A)
 #   MAX_JOBS            maximum parallel build jobs (default: 32)
 #   AITER_JIT_DIR       writable preseeded runtime cache (default: /opt/aiter-jit)
 #   ALPS_PACKAGE_HELPERS package helper path (default: /opt/alps/package-helpers.sh)
@@ -21,6 +22,7 @@ AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:?AITER_REF is required}"
 AITER_COMMIT="${AITER_COMMIT:?AITER_COMMIT is required}"
 GPU_ARCHS="${GPU_ARCHS:?GPU_ARCHS is required}"
+CU_NUM="${CU_NUM-228}"
 MAX_JOBS="${MAX_JOBS:-32}"
 AITER_JIT_DIR="${AITER_JIT_DIR:-/opt/aiter-jit}"
 ALPS_PACKAGE_HELPERS="${ALPS_PACKAGE_HELPERS:-/opt/alps/package-helpers.sh}"
@@ -48,11 +50,12 @@ git clone --depth=1 --branch "${AITER_REF}" --recurse-submodules --shallow-submo
 cd "${src_dir}"
 pip_install python --no-cache-dir -r requirements.txt
 mkdir -p "${dist_dir}"
-echo "Building AITER wheel without multi-architecture AOT; runtime JIT target: ${GPU_ARCHS}"
+echo "Building AITER wheel without multi-architecture AOT; runtime JIT target: ${GPU_ARCHS}, CU_NUM=${CU_NUM}"
 env -u ROCM_PATH -u HIP_PATH \
     PREBUILD_KERNELS=0 \
     AITER_USE_SYSTEM_TRITON=1 \
     GPU_ARCHS="${GPU_ARCHS}" \
+    CU_NUM="${CU_NUM}" \
     MAX_JOBS="${MAX_JOBS}" \
     python setup.py bdist_wheel --dist-dir "${dist_dir}"
 pip_install python --no-cache-dir --no-deps "${dist_dir}"/*.whl
@@ -64,6 +67,7 @@ env -u ROCM_PATH -u HIP_PATH \
     AITER_USE_SYSTEM_TRITON=1 \
     AITER_JIT_DIR="${AITER_JIT_DIR}" \
     GPU_ARCHS="${GPU_ARCHS}" \
+    CU_NUM="${CU_NUM}" \
     MAX_JOBS="${MAX_JOBS}" \
     python - "${src_dir}" <<'PY'
 import sys

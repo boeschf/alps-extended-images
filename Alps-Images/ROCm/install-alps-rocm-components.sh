@@ -1,5 +1,32 @@
 #!/usr/bin/env bash
 
+# Only this installer may recreate its compatibility tree. In particular, never
+# follow or remove a vendor/user-provided /opt/rocm symlink.
+recreate_rocm_compat_root() {
+    local root="${1:?compatibility root required}"
+    local marker="${root}/.alps-rocm-compat"
+    if [[ -L "${root}" ]]; then
+        die "Refusing to replace unmanaged ROCm symlink: ${root}"
+    elif [[ -e "${root}" ]]; then
+        [[ -d "${root}" && -f "${marker}" && ! -L "${marker}" ]] \
+            && [[ "$(cat "${marker}")" == "alps-rocm-compat-v1" ]] \
+            || die "Refusing to replace unmanaged ROCm installation: ${root}"
+        rm -rf -- "${root}"
+    fi
+    install -d "${root}/lib" "${root}/bin" "${root}/include"
+    printf '%s\n' alps-rocm-compat-v1 > "${marker}"
+}
+
+link_rocm_development_library() {
+    local real link="$2"
+    real="$(readlink -f "$1")"
+    [[ -f "${real}" ]] || die "ROCm runtime symlink has no real library: $1"
+    ln -sf "${real}" "${link}"
+    # clang resolves the compatibility link and passes the wheel directory
+    # to the linker, so the development name must exist there as well.
+    ln -sf "$(basename "${real}")" "$(dirname "${real}")/$(basename "${link}")"
+}
+
 # Without the rocm-sdk-devel wheel (not published for all ROCm releases) there
 # is no expanded devel tree and no conventional /opt/rocm layout. Build one
 # from the installed core/libraries wheels so that:
@@ -10,10 +37,11 @@
 build_rocm_compat_layout() {
     [[ -n "${ROCM_CORE_PREFIX:-}" ]] || die "build_rocm_compat_layout requires ROCM_CORE_PREFIX"
     [[ -n "${ROCM_LIBRARIES_PREFIX:-}" ]] || die "build_rocm_compat_layout requires ROCM_LIBRARIES_PREFIX"
+    [[ -n "${ROCM_LIBRARIES_REPO:-}" && -n "${ROCM_LIBRARIES_COMMIT:-}" ]] \
+        || die "ROCm compatibility layout requires profile-pinned rocm-libraries sources"
 
     local root="/opt/rocm"
-    rm -rf "${root}"
-    install -d "${root}/lib" "${root}/bin" "${root}/include"
+    recreate_rocm_compat_root "${root}"
 
     ln -sf "${ROCM_CORE_PREFIX}"/lib/* "${root}/lib/" 2>/dev/null || true
     ln -sf "${ROCM_LIBRARIES_PREFIX}"/lib/* "${root}/lib/" 2>/dev/null || true
@@ -38,10 +66,7 @@ build_rocm_compat_layout() {
         local real=""
         real="$(compgen -G "${root}/lib/${soname}.so.*" | sort -V | tail -n1 || true)"
         [[ -n "${real}" ]] || continue
-        ln -sf "$(basename "${real}")" "${root}/lib/${soname}.so"
-        # Also at the wheel location: clang resolves symlinks and passes the
-        # real directory to the linker.
-        ln -sf "$(basename "${real}")" "$(dirname "${real}")/${soname}.so"
+        link_rocm_development_library "${real}" "${root}/lib/${soname}.so"
     done
 
     # Minimal hip package config so find_package(hip) and the hip::device /
@@ -127,11 +152,100 @@ RCCLCFG
     install -d "${root}/.info"
     printf '%s\n' "${ROCM_VERSION}" > "${root}/.info/version"
 
-    # Optional: devel-compat layer for wheel-only SDK layouts (no devel wheel).
-    # Profiles without ROCM_LIBRARIES_REPO keep the minimal hip/hip-lang/rccl configs.
-    if [[ -n "${ROCM_LIBRARIES_REPO:-}" && -n "${ROCM_LIBRARIES_COMMIT:-}" ]]; then
-        generate_rocm_devel_compat
-    fi
+    generate_rocm_devel_compat
+}
+
+# Render upstream version headers without configuring/building GPU libraries.
+# Fail on unknown source layouts or template fields instead of inventing a
+# component version from the overall SDK release.
+generate_rocm_component_metadata() {
+    "${ROCM_PYTHON:-python3}" - "$1" "$2" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+source, root = map(Path, sys.argv[1:])
+templates = {
+    "hipblas": ("library/include/hipblas-version.h.in", "hipblas/hipblas-version.h"),
+    "hipblaslt": ("library/include/hipblaslt-version.h.in", "hipblaslt/hipblaslt-version.h"),
+    "hipsparselt": ("library/include/hipsparselt-version.h.in", "hipsparselt/hipsparselt-version.h"),
+    "hipsparse": ("library/include/hipsparse-version.h.in", "hipsparse/hipsparse-version.h"),
+    "hipsolver": ("library/include/internal/hipsolver-version.h.in", "hipsolver/internal/hipsolver-version.h"),
+    "rocprim": ("rocprim/include/rocprim/rocprim_version.hpp.in", "rocprim/rocprim_version.hpp"),
+    "hipcub": ("hipcub/include/hipcub/hipcub_version.hpp.in", "hipcub/hipcub_version.hpp"),
+    "rocthrust": ("thrust/rocthrust_version.hpp.in", "thrust/rocthrust_version.hpp"),
+    "rocrand": ("library/include/rocrand/rocrand_version.h.in", "rocrand/rocrand_version.h"),
+    "hiprand": ("library/include/hiprand/hiprand_version.h.in", "hiprand/hiprand_version.h"),
+}
+for package in [*templates, "rocblas", "rocsolver", "miopen", "hipfft"]:
+    project = source / "projects" / package
+    cmake = (project / "CMakeLists.txt").read_text()
+    # Only literal release declarations are accepted. Do not execute arbitrary
+    # project CMake (which can download dependencies or probe GPU compilers).
+    patterns = [
+        r'set\s*\(\s*(?:VERSION_STRING|HIPBLASLT_PROJECT_VERSION)\s+"(\d+\.\d+\.\d+)"',
+        r'project\s*\(\s*\w+\s+VERSION\s+(\d+\.\d+\.\d+)',
+        r'rocm_setup_version\s*\(\s*VERSION\s+"?(\d+\.\d+\.\d+)',
+    ]
+    matches = [m.group(1) for pattern in patterns if (m := re.search(pattern, cmake, re.I))]
+    if package == "hipfft":
+        parts = []
+        for suffix in ("MAJOR", "MINOR", "PATCH"):
+            match = re.search(rf'set\s*\(\s*HIPFFT_VERSION_{suffix}\s+"?(\d+)"?\s*\)', cmake)
+            if not match:
+                sys.exit(f"Missing hipfft release component {suffix} in {project}")
+            parts.append(match.group(1))
+        matches = [".".join(parts)]
+    if len(set(matches)) != 1:
+        sys.exit(f"Missing or ambiguous release version in {project}/CMakeLists.txt: {matches}")
+    version = matches[0]
+    major, minor, patch = map(int, version.split("."))
+    values = {
+        f"{package}_VERSION_MAJOR": major,
+        f"{package}_VERSION_MINOR": minor,
+        f"{package}_VERSION_PATCH": patch,
+        # No vendor build tweak is claimed by this source-only compatibility
+        # layer; the three release components above are authoritative.
+        f"{package}_VERSION_TWEAK": 0,
+        f"{package}_VERSION_NUMBER": major * 100000 + minor * 100 + patch,
+    }
+    if package == "hipcub":
+        cccl = []
+        for suffix in ("MAJOR", "MINOR", "PATCH"):
+            key = f"HIPCUB_CCCL_VERSION_{suffix}"
+            match = re.search(rf'set\s*\(\s*{key}\s+(\d+)\s*\)', cmake)
+            if not match:
+                sys.exit(f"Missing {key} in {project}")
+            values[key] = int(match.group(1))
+            cccl.append(values[key])
+        values["HIPCUB_CCCL_VERSION_NUMBER"] = cccl[0] * 100000 + cccl[1] * 100 + cccl[2]
+    if package in templates:
+        template, destination = templates[package]
+        text = (project / template).read_text()
+        def replace(match):
+            key = match.group(1)
+            if key not in values:
+                sys.exit(f"Unknown version template field {key} in {project / template}")
+            return str(values[key])
+        text = re.sub(r"@(\w+)@", replace, text)
+        # hipSPARSE's version template also carries feature declarations.
+        # Render the pinned source defaults and mappings, not #cmakedefine
+        # directives (which are invalid in an installed C/C++ header).
+        for feature in re.findall(r"^#cmakedefine (\w+)\s*$", text, re.M):
+            header_cmake = (project / "library/include/CMakeLists.txt").read_text()
+            mapping = re.search(rf"set\s*\(\s*{feature}\s+\$\{{(\w+)\}}\s*\)", header_cmake)
+            option = re.search(rf'option\s*\(\s*{mapping.group(1)}\s+"[^"]*"\s+(ON|OFF)\s*\)', cmake) if mapping else None
+            if not option:
+                sys.exit(f"Unknown feature default {feature} in {project}")
+            directive = f"#define {feature}" if option.group(1) == "ON" else f"/* #undef {feature} */"
+            text = re.sub(rf"^#cmakedefine {feature}\s*$", directive, text, flags=re.M)
+        if "#cmakedefine" in text:
+            sys.exit(f"Unsupported CMake directive in {project / template}")
+        destination = root / "include" / destination
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text)
+    print(f"{package}={version}")
+PY
 }
 
 # The wheel-only SDK layout has no devel payload: no CMake package configs, so
@@ -149,11 +263,12 @@ generate_rocm_devel_compat() {
     local src_dir="${ROCM_LIBRARIES_SRC_DIR:-/tmp/rocm-libraries}"
 
     if [[ ! -d "${src_dir}/.git" ]]; then
-        git clone "${ROCM_LIBRARIES_REPO}" "${src_dir}"
+        git init "${src_dir}"
     fi
-    git -C "${src_dir}" fetch --all --quiet
-    git -C "${src_dir}" checkout --quiet --detach
-    git -C "${src_dir}" reset --hard "${ROCM_LIBRARIES_COMMIT}"
+    git -C "${src_dir}" fetch --depth=1 --no-tags "${ROCM_LIBRARIES_REPO}" "${ROCM_LIBRARIES_COMMIT}"
+    git -C "${src_dir}" checkout --quiet --detach FETCH_HEAD
+    [[ "$(git -C "${src_dir}" rev-parse HEAD)" == "${ROCM_LIBRARIES_COMMIT}" ]] \
+        || die "rocm-libraries checkout does not match pinned commit ${ROCM_LIBRARIES_COMMIT}"
 
     # Header installs as "src|dst" pairs relative to the rocm-libraries checkout and
     # /opt/rocm/include. Layouts mirror the installed tree of each project.
@@ -214,16 +329,6 @@ generate_rocm_devel_compat() {
 #endif
 #endif
 HIPBLASEXPORT
-    cat > "${root}/include/hipblas/hipblas-version.h" <<'HIPBLASVERSION'
-#ifndef HIPBLAS_VERSION_H
-#define HIPBLAS_VERSION_H
-#define hipblasVersionMajor 3
-#define hipblasVersionMinor 5
-#define hipblasVersionPatch 0
-#define hipblasVersionTweak 0
-#define hipblasVersionK 100
-#endif
-HIPBLASVERSION
     install -d "${root}/include/hipblaslt"
     cat > "${root}/include/hipblaslt/hipblaslt-export.h" <<'HIPBLASLTEXPORT'
 #ifndef HIPBLASLT_EXPORT_H
@@ -236,15 +341,6 @@ HIPBLASVERSION
 #endif
 #endif
 HIPBLASLTEXPORT
-    cat > "${root}/include/hipblaslt/hipblaslt-version.h" <<'HIPBLASLTVERSION'
-#ifndef _HIPBLASLT_VERSION_H_
-#define _HIPBLASLT_VERSION_H_
-#define HIPBLASLT_VERSION_MAJOR 1
-#define HIPBLASLT_VERSION_MINOR 0
-#define HIPBLASLT_VERSION_PATCH 0
-#define HIPBLASLT_VERSION_TWEAK 0
-#endif
-HIPBLASLTVERSION
     cat > "${root}/include/hipsparselt/hipsparselt-export.h" <<'HIPSPARSELTEXPORT'
 #ifndef HIPSPARSELTEXPORT_H
 #define HIPSPARSELTEXPORT_H
@@ -256,57 +352,6 @@ HIPBLASLTVERSION
 #endif
 #endif
 HIPSPARSELTEXPORT
-    cat > "${root}/include/hipsparselt/hipsparselt-version.h" <<'HIPSPARSELTVERSION'
-#ifndef HIPSPARSELT_VERSION_H
-#define HIPSPARSELT_VERSION_H
-#define HIPSPARSELT_VERSION_MAJOR 0
-#define HIPSPARSELT_VERSION_MINOR 0
-#define HIPSPARSELT_VERSION_PATCH 0
-#endif
-HIPSPARSELTVERSION
-    cat > "${root}/include/thrust/rocthrust_version.hpp" <<'ROCTHRUSTVERSION'
-#ifndef ROCTHRUST_VERSION_HPP_
-#define ROCTHRUST_VERSION_HPP_
-#define ROCTHRUST_VERSION 406000
-#define ROCTHRUST_VERSION_MAJOR 4
-#define ROCTHRUST_VERSION_MINOR 6
-#define ROCTHRUST_VERSION_PATCH 0
-#endif
-ROCTHRUSTVERSION
-    install -d "${root}/include/hipcub"
-    cat > "${root}/include/hipcub/hipcub_version.hpp" <<'HIPCUBVERSION'
-#ifndef HIPCUB_VERSION_HPP_
-#define HIPCUB_VERSION_HPP_
-#define HIPCUB_VERSION 406000
-#define HIPCUB_VERSION_MAJOR 4
-#define HIPCUB_VERSION_MINOR 6
-#define HIPCUB_VERSION_PATCH 0
-#define HIPCUB_CCCL_VERSION 20802
-#endif
-HIPCUBVERSION
-    install -d "${root}/include/rocprim"
-    cat > "${root}/include/rocprim/rocprim_version.hpp" <<'ROCPRIMVERSION'
-#ifndef ROCPRIM_VERSION_HPP_
-#define ROCPRIM_VERSION_HPP_
-#define ROCPRIM_VERSION 406000
-#define ROCPRIM_VERSION_MAJOR 4
-#define ROCPRIM_VERSION_MINOR 6
-#define ROCPRIM_VERSION_PATCH 0
-#endif
-ROCPRIMVERSION
-    install -d "${root}/include/rocrand" "${root}/include/hiprand"
-    cat > "${root}/include/rocrand/rocrand_version.h" <<'ROCRANDVERSION'
-#ifndef ROCRAND_VERSION_H_
-#define ROCRAND_VERSION_H_
-#define ROCRAND_VERSION 500000
-#endif
-ROCRANDVERSION
-    cat > "${root}/include/hiprand/hiprand_version.h" <<'HIPRANDVERSION'
-#ifndef HIPRAND_VERSION_H_
-#define HIPRAND_VERSION_H_
-#define HIPRAND_VERSION 304000
-#endif
-HIPRANDVERSION
 
     # Generated headers the hipsparse/hipsolver packages normally ship from templates.
     cat > "${root}/include/hipsparse/hipsparse-export.h" <<'HIPSPARSEEXPORT'
@@ -320,23 +365,6 @@ HIPRANDVERSION
 #endif
 #endif
 HIPSPARSEEXPORT
-    cat > "${root}/include/hipsparse/hipsparse-version.h" <<'HIPSPARSEVERSION'
-#ifndef HIPSPARSE_VERSION_H
-#define HIPSPARSE_VERSION_H
-#define hipsparseVersionMajor 4
-#define hipsparseVersionMinor 6
-#define hipsparseVersionPatch 0
-#endif
-HIPSPARSEVERSION
-    cat > "${root}/include/hipsolver/internal/hipsolver-version.h" <<'HIPSOLVERVERSION'
-#ifndef HIPSOLVER_VERSION_H
-#define HIPSOLVER_VERSION_H
-#define hipsolverVersionMajor 3
-#define hipsolverVersionMinor 5
-#define hipsolverVersionPatch 0
-#define hipsolverVersionTweak 0
-#endif
-HIPSOLVERVERSION
     cat > "${root}/include/hipsolver/internal/hipsolver-export.h" <<'HIPSOLVEREXPORT'
 #ifndef HIPSOLVER_EXPORT_H
 #define HIPSOLVER_EXPORT_H
@@ -348,6 +376,14 @@ HIPSOLVERVERSION
 #endif
 #endif
 HIPSOLVEREXPORT
+    local version_data pkg version
+    local -A pkg_versions=()
+    version_data="$(generate_rocm_component_metadata "${src_dir}" "${root}")" \
+        || die "Failed to derive ROCm component metadata from ${ROCM_LIBRARIES_COMMIT}"
+    while IFS='=' read -r pkg version; do
+        pkg_versions["${pkg}"]="${version}"
+    done <<< "${version_data}"
+
     # CMake package configs. Header-only packages get INTERFACE targets that
     # carry the include path; library-backed packages get IMPORTED locations.
     local pkg_cmake_dir cmake_config
@@ -355,11 +391,11 @@ HIPSOLVEREXPORT
         pkg_cmake_dir="${root}/lib/cmake/${pkg}"
         install -d "${pkg_cmake_dir}"
         cmake_config="${pkg_cmake_dir}/${pkg}-config.cmake"
-        sed -e "s|@ROCM_ROOT@|${root}|g" -e "s|@PKG@|${pkg}|g" -e "s|@ROCM_VERSION@|${ROCM_VERSION}|g" \
+        sed -e "s|@ROCM_ROOT@|${root}|g" -e "s|@PKG@|${pkg}|g" -e "s|@PKG_VERSION@|${pkg_versions[${pkg}]}|g" \
             > "${cmake_config}" <<'HDRPKGCFG'
 set(@PKG@_INCLUDE_DIR "@ROCM_ROOT@/include")
 set(@PKG@_INCLUDE_DIRS "${@PKG@_INCLUDE_DIR}")
-set(@PKG@_VERSION "@ROCM_VERSION@")
+set(@PKG@_VERSION "@PKG_VERSION@")
 string(TOUPPER @PKG@ UPPERPKG)
 set(${UPPERPKG}_INCLUDE_DIR "${@PKG@_INCLUDE_DIR}")
 set(${UPPERPKG}_INCLUDE_DIRS "${@PKG@_INCLUDE_DIR}")
@@ -384,11 +420,15 @@ HDRPKGCFG
         pkg_cmake_dir="${root}/lib/cmake/${pkg}"
         install -d "${pkg_cmake_dir}"
         cmake_config="${pkg_cmake_dir}/${pkg}-config.cmake"
-        sed -e "s|@ROCM_ROOT@|${root}|g" -e "s|@PKG@|${pkg}|g" -e "s|@ROCM_VERSION@|${ROCM_VERSION}|g" -e "s|@LIBREAL@|${real}|g" \
+        sed -e "s|@ROCM_ROOT@|${root}|g" -e "s|@PKG@|${pkg}|g" -e "s|@PKG_VERSION@|${pkg_versions[${pkg}]:-}|g" -e "s|@LIBREAL@|${real}|g" \
             > "${cmake_config}" <<'LIBPKGCFG'
 set(@PKG@_INCLUDE_DIR "@ROCM_ROOT@/include")
 set(@PKG@_INCLUDE_DIRS "${@PKG@_INCLUDE_DIR}")
-set(@PKG@_VERSION "@ROCM_VERSION@")
+# SDK-only components have no release declaration in rocm-libraries; leave
+# their version unspecified rather than misrepresenting it as ROCM_VERSION.
+if(NOT "@PKG_VERSION@" STREQUAL "")
+    set(@PKG@_VERSION "@PKG_VERSION@")
+endif()
 string(TOUPPER @PKG@ UPPERPKG)
 set(${UPPERPKG}_INCLUDE_DIR "${@PKG@_INCLUDE_DIR}")
 set(${UPPERPKG}_INCLUDE_DIRS "${@PKG@_INCLUDE_DIR}")
@@ -415,7 +455,7 @@ endif()
 LIBPKGCFG
         # The linker resolves -l<name> against the dev symlink, which the wheel
         # layout omits; create it next to the runtime soname.
-        ln -sf "$(basename "${real}")" "${root}/lib/${soname}.so"
+        link_rocm_development_library "${real}" "${root}/lib/${soname}.so"
     done
 
     # clang 23 and CMake's enable_language(HIP) derive their ROCm root from the compiler
@@ -441,6 +481,75 @@ LIBPKGCFG
     echo "Generated ROCm devel compatibility layer (package configs + headers) at ${root}"
 }
 
+# Return 1 only for an absent distribution; an incompatible installed SDK is
+# an error, not permission to silently keep or replace a base-image runtime.
+rocm_sdk_distribution_present() {
+    "${ROCM_PYTHON}" - "$1" "${ROCM_VERSION}" <<'PY'
+import sys
+from importlib.metadata import PackageNotFoundError, version
+try:
+    from packaging.version import Version
+except ImportError:
+    from pip._vendor.packaging.version import Version
+
+name, expected = sys.argv[1:]
+try:
+    installed = version(name)
+except PackageNotFoundError:
+    sys.exit(1)
+# TheRock's release10 versioning uses X.Y.ZaYYYYMMDD for nightlies and
+# X.Y.Z.dev0+SHA for development wheels. Profiles select the SDK base release;
+# preserve those installed builds, but honor an explicitly suffixed version.
+actual_version, expected_version = Version(installed), Version(expected)
+matches = actual_version.base_version == expected_version.base_version
+if expected_version.public != expected_version.base_version:
+    matches = actual_version.public == expected_version.public
+if not matches:
+    print(f"Incompatible {name}: installed {installed}, expected ROCm {expected}", file=sys.stderr)
+    sys.exit(2)
+PY
+}
+
+install_rocm_sdk_wheels() {
+    local -a distributions=(rocm rocm-sdk-core rocm-sdk-libraries)
+    local -a sdk_packages=()
+    local target pkg status
+    for target in ${RCCL_GPU_TARGETS//;/ }; do
+        [[ -n "${target}" ]] && distributions+=("rocm-sdk-device-${target}")
+    done
+    ROCM_HAVE_DEVEL=no
+    if rocm_sdk_distribution_present rocm-sdk-devel; then
+        ROCM_HAVE_DEVEL=yes
+    else
+        status=$?
+        [[ "${status}" == 1 ]] || die "Installed rocm-sdk-devel does not match ROCM_VERSION"
+        # Missing devel is intentional only for a source-pinned compatibility
+        # profile. Other profiles (including 7.14) must install the real wheel.
+        if [[ -z "${ROCM_LIBRARIES_REPO:-}" || -z "${ROCM_LIBRARIES_COMMIT:-}" ]]; then
+            distributions+=(rocm-sdk-devel)
+            ROCM_HAVE_DEVEL=yes
+        fi
+    fi
+    for pkg in "${distributions[@]}"; do
+        if rocm_sdk_distribution_present "${pkg}"; then
+            continue
+        else
+            status=$?
+            [[ "${status}" == 1 ]] || die "Installed ${pkg} does not match ROCM_VERSION"
+        fi
+        sdk_packages+=("${pkg}==${ROCM_VERSION}")
+    done
+    if [[ "${#sdk_packages[@]}" -gt 0 ]]; then
+        "${ROCM_PYTHON}" -m pip install --no-cache-dir --index-url "${ROCM_PYPI_INDEX_URL}" --no-deps "${sdk_packages[@]}" \
+            || die "Failed to install required ROCm SDK wheels"
+        for pkg in "${distributions[@]}"; do
+            rocm_sdk_distribution_present "${pkg}" || die "Required ROCm SDK wheel missing or incompatible after install: ${pkg}"
+        done
+    else
+        echo "Matching ROCm SDK wheels already present in base image"
+    fi
+}
+
 bootstrap_rocm_sdk() {
     : "${ROCM_VERSION:?ROCM_VERSION must be set}"
     : "${ROCM_PYPI_INDEX_URL:?ROCM_PYPI_INDEX_URL must be set to the ROCm wheel index}"
@@ -449,46 +558,12 @@ bootstrap_rocm_sdk() {
 
     [[ -x "${ROCM_PYTHON}" ]] || die "ROCm Python not found: ${ROCM_PYTHON}"
 
-    # Install the SDK wheels unless the base image already ships them. Some
-    # base images (e.g. the ROCm 10.0 PyTorch image) are built from an index
-    # that is not publicly available, so reinstalling pinned versions would
-    # fail; the preinstalled wheels are authoritative in that case.
-    local -a sdk_packages=()
-    local pkg have
-    for pkg in "rocm==${ROCM_VERSION}" "rocm-sdk-core==${ROCM_VERSION}" "rocm-sdk-libraries==${ROCM_VERSION}"; do
-        # Check the installed distribution, not an importable module: hyphens
-        # are invalid in module names (find_spec would always miss them) and
-        # "rocm" is a meta package with no importable module at all.
-        if "${ROCM_PYTHON}" -c "import importlib.metadata, sys; sys.exit(0 if importlib.metadata.version(\"${pkg%%==*}\") else 1)" 2>/dev/null; then
-            continue
-        fi
-        sdk_packages+=("${pkg}")
-    done
-    local target
-    for target in ${RCCL_GPU_TARGETS//;/ }; do
-        [[ -n "${target}" ]] || continue
-        have="$("${ROCM_PYTHON}" -c "import importlib.util, sys; spec = importlib.util.find_spec(\"rocm_sdk_device_${target//-/_}\"); sys.exit(0 if spec else 1)" && echo yes || echo no)"
-        [[ "${have}" == yes ]] || sdk_packages+=("rocm-sdk-device-${target}==${ROCM_VERSION}")
-    done
-    if [[ "${#sdk_packages[@]}" -gt 0 ]]; then
-        "${ROCM_PYTHON}" -m pip install --no-cache-dir --index-url "${ROCM_PYPI_INDEX_URL}" --no-deps "${sdk_packages[@]}"
-    else
-        echo "ROCm SDK wheels already present in base image; skipping wheel install"
-    fi
-
-    # rocm-sdk-devel provides the expanded devel tree and the rocm-sdk CLI
-    # helpers that need it. It is optional: when missing (ROCm 10.0 is not
-    # published on the public wheel index), derive the SDK layout ourselves.
-    local have_devel="no"
-    "${ROCM_PYTHON}" -c "import rocm_sdk_devel" 2>/dev/null && have_devel="yes"
+    install_rocm_sdk_wheels
+    local have_devel="${ROCM_HAVE_DEVEL}"
     if [[ "${have_devel}" == yes ]]; then
-        if ! "${ROCM_PYTHON}" -m pip show rocm-sdk-devel >/dev/null 2>&1 \
-            || [[ "$("${ROCM_PYTHON}" -m pip show rocm-sdk-devel 2>/dev/null | sed -n 's/^Version: //p')" != "${ROCM_VERSION}" ]]; then
-            "${ROCM_PYTHON}" -m pip install --no-cache-dir --index-url "${ROCM_PYPI_INDEX_URL}" --no-deps "rocm-sdk-devel==${ROCM_VERSION}"
-        fi
         "${ROCM_SDK}" init
     else
-        echo "rocm-sdk-devel not available; deriving SDK layout without rocm-sdk init"
+        echo "Source-pinned profile: deriving SDK layout without rocm-sdk-devel"
     fi
 
     ROCM_CORE_DIR="$(ROCM_DIST_NAME=rocm-sdk-core "${ROCM_PYTHON}" - <<'PY'
@@ -878,7 +953,8 @@ persist_rocm_sdk_env() {
 }
 
 rocm_sdk_prefix_candidates() {
-    local candidate
+    local candidate build_devel=""
+    [[ "${1:-runtime}" != build ]] || build_devel="${ROCM_DEVEL_PREFIX:-}"
     local -A emitted=()
 
     # Runtime trees first: the ldconfig cache must map shared sonames
@@ -889,6 +965,7 @@ rocm_sdk_prefix_candidates() {
     for candidate in \
         "${ROCM_CORE_PREFIX:-}" \
         "${ROCM_LIBRARIES_PREFIX:-}" \
+        "${build_devel}" \
         "/opt/rocm" \
         "${ROCM_DEVEL_PREFIX:-}" \
         "${ROCM_BUILD_PREFIX:-}" \
@@ -973,7 +1050,7 @@ discover_rocm_build_prefix() {
             printf '%s\n' "${candidate}"
             return 0
         fi
-    done < <(rocm_sdk_prefix_candidates)
+    done < <(rocm_sdk_prefix_candidates build)
     return 1
 }
 
@@ -1367,12 +1444,10 @@ build_aws_ofi_rccl() {
         "$@"
 }
 
-build_rccl_tests() {
-    : "${RCCL_TESTS_GPU_TARGETS:?RCCL_TESTS_GPU_TARGETS must be set}"
-    : "${RCCL_TESTS_BUILDDIR:=/tmp/rccl-tests-build}"
-
-    clone_rocm_systems
-    rm -rf "${RCCL_TESTS_BUILDDIR}"
+patch_rocm_rccl_test_sources() {
+    # 7.14's real devel package supplies the HIP compile options. Only the
+    # ROCm 10 wheel-only compatibility config needs this source workaround.
+    [[ "${ROCM_VERSION%%.*}" == 10 ]] || return 0
     # The hipified test sources use CUDA device intrinsics that only resolve
     # when the compiler runs in HIP mode (plain amdclang++ C++ compiles do not
     # define __HIP__, which gates those declarations in the HIP headers).
@@ -1411,6 +1486,17 @@ PYEOF
         echo "ERROR: rccl-tests CMakeLists patch not applied" >&2
         exit 1
     fi
+}
+
+build_rccl_tests() {
+    : "${RCCL_TESTS_GPU_TARGETS:?RCCL_TESTS_GPU_TARGETS must be set}"
+    : "${RCCL_TESTS_BUILDDIR:=/tmp/rccl-tests-build}"
+
+    clone_rocm_systems
+    rm -rf "${RCCL_TESTS_BUILDDIR}"
+    patch_rocm_rccl_test_sources
+    # Both pinned rocm-systems revisions read GPU_TARGETS in RCCL and its
+    # tests; AMDGPU_TARGETS is not their architecture-selection cache entry.
     cmake -S "${ROCM_SYSTEMS_SRC_DIR}/projects/rccl-tests" -B "${RCCL_TESTS_BUILDDIR}" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH="${OMPI_PREFIX};${RCCL_PREFIX};${RCCL_LIB_DIR:-};${RCCL_INCLUDE_DIR:-};${CMAKE_PREFIX_PATH}" \

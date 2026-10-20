@@ -147,7 +147,7 @@ case "${accel}" in
         export PATH="${ROCM_BUILD_PREFIX}/bin:${ROCM_BUILD_PREFIX}/llvm/bin:${PATH}"
         rocm_libdir="${ROCM_BUILD_PREFIX}/lib64"
         [[ -d "${rocm_libdir}" ]] || rocm_libdir="${ROCM_BUILD_PREFIX}/lib"
-        export LD_LIBRARY_PATH="${rocm_libdir}:${LD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="${rocm_libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
         cmake_args+=(
             -DUSE_HIP=ON
             -DUSE_CUDA=OFF
@@ -193,6 +193,10 @@ if [[ "${accel}" == "cuda" ]]; then
 fi
 
 snapshot_apt_packages /tmp/mooncake-apt-before.txt
+# Match the unqualified dependency names even when dpkg adds a Multi-Arch suffix.
+mapfile -t apt_packages_before < /tmp/mooncake-apt-before.txt
+printf '%s\n' "${apt_packages_before[@]%%:*}" > /tmp/mooncake-apt-before.txt
+unset apt_packages_before
 apt_get update
 apt_get install -y --no-install-recommends \
     ca-certificates "${ibverbs_apt_build_deps[@]}" "${mooncake_apt_build_deps[@]}"
@@ -342,10 +346,20 @@ echo "INFO: keeping mooncake runtime library packages: ${runtime_pkg_list[*]}"
 apt_mark manual "${runtime_pkg_list[@]}"
 rm -f "${runtime_packages}"
 
-cleanup_new_apt_build_deps /tmp/mooncake-apt-before.txt "${mooncake_apt_build_deps[@]}"
-APT_CLEANUP_HOLD_PACKAGES="libibverbs1 ibverbs-providers libnl-3-200 libnl-route-3-200" \
-    cleanup_apt_build_deps "${ibverbs_apt_build_deps[@]}"
+# Preserve pre-existing RDMA development packages as well as runtime libraries.
+# Only packages installed by this build may be removed, including on CUDA bases
+# whose matching DOCA development packages cannot be reinstalled from Ubuntu.
+ibverbs_hold_packages="libibverbs1 ibverbs-providers libnl-3-200 libnl-route-3-200"
 for pkg in "${ibverbs_apt_build_deps[@]}"; do
+    if grep -Fxq "${pkg}" /tmp/mooncake-apt-before.txt; then
+        ibverbs_hold_packages+=" ${pkg}"
+    fi
+done
+APT_CLEANUP_HOLD_PACKAGES="${ibverbs_hold_packages}" \
+    cleanup_new_apt_build_deps /tmp/mooncake-apt-before.txt \
+        "${mooncake_apt_build_deps[@]}" "${ibverbs_apt_build_deps[@]}"
+for pkg in "${ibverbs_apt_build_deps[@]}"; do
+    grep -Fxq "${pkg}" /tmp/mooncake-apt-before.txt && continue
     if dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null \
         | grep -q '^ii '; then
         die "${pkg} remains installed after Mooncake build"
