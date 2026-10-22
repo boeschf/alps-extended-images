@@ -27,10 +27,24 @@ link_rocm_development_library() {
     ln -sf "$(basename "${real}")" "$(dirname "${real}")/$(basename "${link}")"
 }
 
+# The wheel compiler stores bitcode below lib/llvm, but ROCM_PATH makes clang
+# search only ${ROCM_PATH}/amdgcn/bitcode (not the compiler-relative roots).
+# Expose the same real payload at both roots used by our build environment.
+link_rocm_device_libraries() {
+    local root="${1:?compatibility root required}"
+    local amdgcn="${ROCM_CORE_PREFIX:?ROCM_CORE_PREFIX required}/lib/llvm/amdgcn"
+    [[ -f "${amdgcn}/bitcode/ocml.bc" && -f "${amdgcn}/bitcode/ockl.bc" ]] \
+        || die "ROCm core wheel is missing HIP device bitcode: ${amdgcn}/bitcode (expected ocml.bc and ockl.bc)"
+    [[ ! -e "${ROCM_CORE_PREFIX}/amdgcn" || -L "${ROCM_CORE_PREFIX}/amdgcn" ]] \
+        || die "Refusing to replace ROCm wheel device-library directory: ${ROCM_CORE_PREFIX}/amdgcn"
+    ln -sfn "${amdgcn}" "${root}/amdgcn"
+    ln -sfn "${amdgcn}" "${ROCM_CORE_PREFIX}/amdgcn"
+}
+
 # Without the rocm-sdk-devel wheel (not published for all ROCm releases) there
 # is no expanded devel tree and no conventional /opt/rocm layout. Build one
 # from the installed core/libraries wheels so that:
-# - clang finds the device bitcode via the default /opt/rocm search path,
+# - clang finds the device bitcode via /opt/rocm and the wheel-prefix root,
 # - the linker finds libamdhip64.so and other runtime libs,
 # - aws-ofi-rccl and other consumers find headers and cmake packages.
 # This mirrors what `rocm-sdk init` provides, without the devel payload.
@@ -47,7 +61,7 @@ build_rocm_compat_layout() {
     ln -sf "${ROCM_LIBRARIES_PREFIX}"/lib/* "${root}/lib/" 2>/dev/null || true
     ln -sf "${ROCM_CORE_PREFIX}"/include/* "${root}/include/" 2>/dev/null || true
     ln -sfn "${ROCM_CORE_PREFIX}/lib/llvm" "${root}/llvm"
-    [[ -d "${ROCM_CORE_PREFIX}/lib/llvm/amdgcn" ]] && ln -sfn "${ROCM_CORE_PREFIX}/lib/llvm/amdgcn" "${root}/amdgcn"
+    link_rocm_device_libraries "${root}"
     ln -sf "${ROCM_CORE_PREFIX}"/bin/* "${root}/bin/" 2>/dev/null || true
 
     # The runtime loader finds rocm_sysdeps via ldconfig, but the linker

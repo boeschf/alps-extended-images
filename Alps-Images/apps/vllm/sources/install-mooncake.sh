@@ -161,6 +161,14 @@ ibverbs_apt_build_deps=(
     libnl-route-3-dev
 )
 
+# Mooncake links ibverbs but does not require RDMA CM development headers.
+# The CUDA base also carries librdmacm-dev, which depends on libibverbs-dev;
+# remove it when present without installing it unnecessarily on ROCm.
+rdma_apt_purge_deps=(
+    "${ibverbs_apt_build_deps[@]}"
+    librdmacm-dev
+)
+
 mooncake_apt_build_deps=(
     cmake
     git
@@ -349,14 +357,20 @@ rm -f "${runtime_packages}"
 # Remove newly installed build tools plus the RDMA development packages even
 # when inherited from the base. Refuse collateral removals and avoid autoremove;
 # the runtime packages marked above must remain in the final image.
-mooncake_cleanup_packages=("${ibverbs_apt_build_deps[@]}")
+mooncake_cleanup_packages=()
+for pkg in "${rdma_apt_purge_deps[@]}"; do
+    if dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null \
+        | grep -q '^ii '; then
+        mooncake_cleanup_packages+=("${pkg}")
+    fi
+done
 for pkg in "${mooncake_apt_build_deps[@]}"; do
     if ! grep -Fxq "${pkg}" /tmp/mooncake-apt-before.txt; then
         mooncake_cleanup_packages+=("${pkg}")
     fi
 done
 purge_apt_build_deps_exact "${mooncake_cleanup_packages[@]}"
-for pkg in "${ibverbs_apt_build_deps[@]}"; do
+for pkg in "${rdma_apt_purge_deps[@]}"; do
     if dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null \
         | grep -q '^ii '; then
         die "${pkg} remains installed after Mooncake build"

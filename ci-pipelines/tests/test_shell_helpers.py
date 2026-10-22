@@ -607,7 +607,9 @@ def test_exact_build_package_purge_refuses_reverse_dependency_removal(tmp_path):
             f"{dependencies}Description: isolated cleanup regression fixture\n"
             for name, dependencies in (
                 ("libibverbs1", ""),
+                ("librdmacm1", "Depends: libibverbs1\n"),
                 ("libibverbs-dev", "Depends: libibverbs1\n"),
+                ("librdmacm-dev", "Depends: libibverbs-dev, librdmacm1\n"),
                 ("doca-base", "Depends: libibverbs-dev\n"),
             )
         )
@@ -630,7 +632,7 @@ apt_get() {
         -o Dir::Etc::sourceparts=- \
         "$@"
 }
-purge_apt_build_deps_exact libibverbs-dev
+purge_apt_build_deps_exact libibverbs-dev librdmacm-dev
 ''',
         env={
             "REAL_APT_GET": apt_get,
@@ -642,3 +644,66 @@ purge_apt_build_deps_exact libibverbs-dev
     assert result.returncode != 0
     assert "refusing build-package purge that also removes doca-base" in result.stderr
     assert "Unexpected attempt to mutate packages" not in result.stderr
+
+
+def test_rocm_device_bitcode_is_reachable_from_explicit_core_root(tmp_path):
+    core = tmp_path / "core"
+    compat = tmp_path / "compat"
+    bitcode = core / "lib" / "llvm" / "amdgcn" / "bitcode"
+    bitcode.mkdir(parents=True)
+    compat.mkdir()
+    for name in ("ocml.bc", "ockl.bc"):
+        (bitcode / name).write_text(name)
+    run_bash(
+        source_rocm('link_rocm_device_libraries "$COMPAT_ROOT"; link_rocm_device_libraries "$COMPAT_ROOT"'),
+        env={"ROCM_CORE_PREFIX": str(core), "COMPAT_ROOT": str(compat)},
+    )
+    # ROCM_PATH explicitly selects the core prefix, not the compatibility root.
+    for prefix in (core, compat):
+        for name in ("ocml.bc", "ockl.bc"):
+            discovered = prefix / "amdgcn" / "bitcode" / name
+            assert discovered.samefile(bitcode / name)
+            assert discovered.read_text() == name
+
+
+@pytest.mark.parametrize("missing", ["ocml.bc", "ockl.bc"])
+def test_rocm_device_layout_rejects_incomplete_bitcode_without_partial_links(tmp_path, missing):
+    core = tmp_path / "core"
+    compat = tmp_path / "compat"
+    bitcode = core / "lib" / "llvm" / "amdgcn" / "bitcode"
+    bitcode.mkdir(parents=True)
+    compat.mkdir()
+    for name in ("ocml.bc", "ockl.bc"):
+        if name != missing:
+            (bitcode / name).write_text(name)
+    result = run_bash(
+        source_rocm('link_rocm_device_libraries "$COMPAT_ROOT"'),
+        env={"ROCM_CORE_PREFIX": str(core), "COMPAT_ROOT": str(compat)},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert str(bitcode) in result.stderr
+    assert not (core / "amdgcn").is_symlink()
+    assert not (compat / "amdgcn").is_symlink()
+
+
+def test_rocm_device_layout_preserves_existing_vendor_directory(tmp_path):
+    core = tmp_path / "core"
+    compat = tmp_path / "compat"
+    bitcode = core / "lib" / "llvm" / "amdgcn" / "bitcode"
+    bitcode.mkdir(parents=True)
+    compat.mkdir()
+    for name in ("ocml.bc", "ockl.bc"):
+        (bitcode / name).write_text(name)
+    vendor = core / "amdgcn"
+    vendor.mkdir()
+    sentinel = vendor / "vendor-owned"
+    sentinel.write_text("preserve")
+    result = run_bash(
+        source_rocm('link_rocm_device_libraries "$COMPAT_ROOT"'),
+        env={"ROCM_CORE_PREFIX": str(core), "COMPAT_ROOT": str(compat)},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert sentinel.read_text() == "preserve"
+    assert not vendor.is_symlink()
