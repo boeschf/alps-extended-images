@@ -1289,6 +1289,19 @@ build_libfabric() {
         --with-rocr="${ROCM_BUILD_PREFIX}"
 }
 
+rocm_hip_cxx_compiler() {
+    # The devel tree provides bin/amdclang++; wheel-only SDKs keep clang++
+    # under the core wheel's lib/llvm/bin.
+    local candidate
+    for candidate in "${ROCM_SDK_BIN}/amdclang++" "${ROCM_CORE_PREFIX}/lib/llvm/bin/clang++"; do
+        if [[ -x "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    die "No HIP C++ compiler found in ROCm SDK: ${ROCM_SDK_BIN}, ${ROCM_CORE_PREFIX}/lib/llvm/bin"
+}
+
 build_rccl() {
     : "${RCCL_PREFIX:=/opt/alps/rocm/rccl}"
     : "${RCCL_GPU_TARGETS:?RCCL_GPU_TARGETS must be set}"
@@ -1297,13 +1310,8 @@ build_rccl() {
     clone_rocm_systems
     rm -rf "${RCCL_PREFIX}" "${RCCL_BUILDDIR}"
 
-    # Compiler layouts differ between SDK versions: the devel tree provides
-    # bin/amdclang++, the wheel-only layout keeps clang++ under lib/llvm/bin.
-    local rccl_cxx=""
-    for candidate in "${ROCM_SDK_BIN}/amdclang++" "${ROCM_CORE_PREFIX}/lib/llvm/bin/clang++"; do
-        [[ -x "${candidate}" ]] && { rccl_cxx="${candidate}"; break; }
-    done
-    [[ -n "${rccl_cxx}" ]] || die "No HIP C++ compiler found for RCCL build"
+    local rccl_cxx
+    rccl_cxx="$(rocm_hip_cxx_compiler)"
 
     cmake -S "${ROCM_SYSTEMS_SRC_DIR}/projects/rccl" -B "${RCCL_BUILDDIR}" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
@@ -1509,10 +1517,15 @@ build_rccl_tests() {
     clone_rocm_systems
     rm -rf "${RCCL_TESTS_BUILDDIR}"
     patch_rocm_rccl_test_sources
+    local rccl_cxx
+    rccl_cxx="$(rocm_hip_cxx_compiler)"
+    # The upstream toolchain defaults to ROCM_PATH/llvm/bin/amdclang++,
+    # which does not exist in the runtime-wheel layout.
     # Both pinned rocm-systems revisions read GPU_TARGETS in RCCL and its
     # tests; AMDGPU_TARGETS is not their architecture-selection cache entry.
     cmake -S "${ROCM_SYSTEMS_SRC_DIR}/projects/rccl-tests" -B "${RCCL_TESTS_BUILDDIR}" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_COMPILER="${rccl_cxx}" \
         -DCMAKE_PREFIX_PATH="${OMPI_PREFIX};${RCCL_PREFIX};${RCCL_LIB_DIR:-};${RCCL_INCLUDE_DIR:-};${CMAKE_PREFIX_PATH}" \
         -DUSE_MPI=ON \
         -DGPU_TARGETS="${RCCL_TESTS_GPU_TARGETS}"

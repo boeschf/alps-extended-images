@@ -707,3 +707,34 @@ def test_rocm_device_layout_preserves_existing_vendor_directory(tmp_path):
     assert result.returncode != 0
     assert sentinel.read_text() == "preserve"
     assert not vendor.is_symlink()
+
+
+@pytest.mark.parametrize("devel_executable", [True, False])
+def test_rocm_hip_compiler_prefers_devel_and_falls_back_to_wheel(tmp_path, devel_executable):
+    sdk_bin = tmp_path / "sdk" / "bin"
+    wheel_bin = tmp_path / "core" / "lib" / "llvm" / "bin"
+    sdk_bin.mkdir(parents=True)
+    wheel_bin.mkdir(parents=True)
+    devel = sdk_bin / "amdclang++"
+    wheel = wheel_bin / "clang++"
+    for compiler in (devel, wheel):
+        compiler.write_text("#!/bin/sh\nexit 0\n")
+        compiler.chmod(0o755)
+    if not devel_executable:
+        devel.chmod(0o644)
+    result = run_bash(
+        source_rocm("rocm_hip_cxx_compiler"),
+        env={"ROCM_SDK_BIN": str(sdk_bin), "ROCM_CORE_PREFIX": str(tmp_path / "core")},
+    )
+    assert Path(result.stdout.strip()) == (devel if devel_executable else wheel)
+
+
+def test_rocm_hip_compiler_rejects_missing_sdk_tools(tmp_path):
+    result = run_bash(
+        source_rocm("rocm_hip_cxx_compiler"),
+        env={"ROCM_SDK_BIN": str(tmp_path / "sdk" / "bin"), "ROCM_CORE_PREFIX": str(tmp_path / "core")},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "No HIP C++ compiler found in ROCm SDK" in result.stderr
+    assert str(tmp_path / "core" / "lib" / "llvm" / "bin") in result.stderr
