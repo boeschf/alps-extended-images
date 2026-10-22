@@ -257,6 +257,33 @@ def test_meta_validate_rocm_profile_rejects_invalid_rebuild_flag(tmp_path):
     assert "ROCM_REBUILD_RCCL must be 0 or 1" in result.stderr
 
 
+def test_meta_validate_rocm_profile_requires_paired_libraries_pins(tmp_path):
+    base_profile = (
+        ROOT / "Alps-Images/ROCm"
+        / "pytorch-rocm7.14-ubuntu24.04-py3.12-torch2.11/profile.env"
+    ).read_text()
+    profile = tmp_path / "profile.env"
+    for pin in (
+        'ROCM_LIBRARIES_REPO="https://example.invalid/libraries.git"',
+        'ROCM_LIBRARIES_COMMIT="abc123"',
+    ):
+        profile.write_text(base_profile + "\n" + pin + "\n")
+        result = run_meta(f"load_rocm_profile {profile}", check=False)
+        assert result.returncode != 0
+        assert "ROCM_LIBRARIES_REPO and ROCM_LIBRARIES_COMMIT must be set together" in result.stderr
+
+
+def test_meta_load_rocm_profile_clears_optional_libraries_pins():
+    result = run_meta(
+        'ROCM_LIBRARIES_REPO=https://example.invalid/previous.git; '
+        'ROCM_LIBRARIES_COMMIT=previous; '
+        "load_rocm_profile Alps-Images/ROCm/"
+        "pytorch-rocm7.14-ubuntu24.04-py3.12-torch2.11/profile.env; "
+        'printf "repo=<%s> commit=<%s>\\n" "$ROCM_LIBRARIES_REPO" "$ROCM_LIBRARIES_COMMIT"'
+    )
+    assert result.stdout.strip() == "repo=<> commit=<>"
+
+
 def test_meta_profile_value_accepts_quoted_value_with_inline_comment(tmp_path):
     profile = tmp_path / "profile.env"
     profile.write_text('APP_VARIANTS="cuda rocm" # supported variants\n')

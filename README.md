@@ -34,6 +34,7 @@ Each variant corresponds to an AMD ROCm container extended with the Alps HPC sta
 
 | Image | ROCm Base | Use Case |
 |-------|-----------|----------|
+| `pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13-alps7-dev` | `docker.io/rocm/pytorch:rocm10.0_ubuntu24.04_py3.12_pytorch_release_2.13.0` | ROCm PyTorch workloads on MI300-class systems |
 | `pytorch-rocm:rocm7.14-ubuntu24.04-py3.12-torch2.11-alps7-dev` | `docker.io/rocm/pytorch:rocm7.14_ubuntu24.04_py3.12_pytorch_release_2.11.0` | ROCm PyTorch workloads on MI300-class systems |
 
 ### Application Images
@@ -68,6 +69,10 @@ The base installers use shared defaults from `common/alps-stack-versions.env`, s
 | OSU Micro-benchmarks | 7.5.2 | Point-to-point latency and bandwidth measurements |
 
 CUDA components are compiled with CUDA support and architecture-specific flags for NVIDIA Hopper (SM90/SM90a). ROCm components keep the bundled RCCL by default, build aws-ofi-rccl against the Alps libfabric stack, and build rccl-tests for MI250/MI300 targets (`gfx90a`, `gfx942`) using the ROCm SDK from the image profile. RCCL rebuilds are opt-in with `ROCM_REBUILD_RCCL=1`.
+
+The ROCm 10.0 profile targets `gfx942` and pins both `rocm-systems` and `rocm-libraries`. For wheel-only SDK layouts without `rocm-sdk-devel`, the base installer assembles an `/opt/rocm` compatibility prefix from the installed SDK wheels, supplies development headers and CMake package metadata from the pinned sources, and generates missing RCCL headers without rebuilding the bundled RCCL. These source pins are included in canonical base hashes and passed through both CI and manual builds. The ROCm 7.14 profile remains available; existing app profiles are unchanged.
+
+Both ROCm profiles default `NCCL_P2P_DISABLE=1` when `/run/.containerenv` is absent, targeting the RCCL IPC failures observed under enroot on Beverin's current kernel. Podman-based runtimes provide that marker and retain RCCL's P2P default. An explicitly set `NCCL_P2P_DISABLE`, including an empty value, is always preserved.
 
 Patches for upstream issues in libfabric, NCCL, and aws-ofi-nccl are maintained under `Alps-Images/patches/` and are included in base image hashes. Application-specific patches are kept under `Alps-Images/apps/<app>/patches/` and are included in app image hashes.
 
