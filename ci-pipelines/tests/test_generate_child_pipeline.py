@@ -1,4 +1,5 @@
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -142,6 +143,34 @@ def test_generate_missing_base_emits_build_tests_marker_publish(monkeypatch, gen
     assert child.data["test-base-pytorch-cuda-26-06-py3-env"]["needs"] == ["build-base-pytorch-cuda-26-06-py3"]
     assert child.data[mark]["needs"] == ["test-base-pytorch-cuda-26-06-py3-env"]
     assert child.data["publish-base-pytorch-cuda-26-06-py3"]["needs"] == [mark]
+
+
+@pytest.mark.parametrize("kind", ["base", "app"])
+def test_build_lock_tracks_full_canonical_ref_not_job_or_commit(monkeypatch, gen, kind):
+    fake_registry(monkeypatch, gen, {})
+
+    def lock_for(ref, name="original", revision="first"):
+        child = gen.Child()
+        if kind == "base":
+            base = base_image(NAME=name, CANON_IMAGE_REF=ref, OCI_REVISION=revision)
+            gen.add_base(child, base, base_tests(), valid=False)
+        else:
+            app = app_image(NAME=name, CANON_IMAGE_REF=ref, OCI_REVISION=revision)
+            gen.add_app(child, app, app_tests(), {app["BASE_IMAGE"]: None}, {app["BASE_IMAGE"]: True})
+        build = next(job for name, job in child.data.items() if name.startswith("build-"))
+        return build["resource_group"]
+
+    canonical = "registry.example:5000/ns/image:content-one"
+    lock = lock_for(canonical)
+    assert lock_for(canonical, name="another-job", revision="another-commit") == lock
+    assert re.fullmatch(r"[a-z0-9-]+", lock)
+    for different_ref in (
+        "registry.example:5000/ns/image:content-two",
+        "registry.example:5000/ns/image:content_one",
+        "registry.example:5000/ns/other-image:content-one",
+        "other.example:5000/ns/image:content-one",
+    ):
+        assert lock_for(different_ref) != lock
 
 
 def test_generate_existing_base_missing_marker_emits_tests_marker_publish(monkeypatch, gen):

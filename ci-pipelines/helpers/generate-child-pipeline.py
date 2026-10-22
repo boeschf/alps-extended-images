@@ -19,6 +19,7 @@ reviewed static templates.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
@@ -66,6 +67,12 @@ def slug(value: str) -> str:
     if not result:
         raise RuntimeError(f"slug produced empty string for {value!r}")
     return result
+
+
+def canonical_build_lock(canonical_ref: str) -> str:
+    """Serialize writers of one canonical ref without blocking other images."""
+    digest = hashlib.sha256(canonical_ref.encode("utf-8")).hexdigest()
+    return f"canonical-build-{digest}"
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -191,6 +198,7 @@ class Child:
         variables: dict[str, str] | None = None,
         timeout: str | None = None,
         script: list[str] | None = None,
+        resource_group: str | None = None,
     ) -> None:
         """Add a concrete generated job that extends one hidden template."""
         if name in self.jobs:
@@ -207,6 +215,8 @@ class Child:
             job["variables"] = {key: str(value) for key, value in sorted(variables.items())}
         if script:
             job["script"] = script
+        if resource_group:
+            job["resource_group"] = resource_group
         self.data[name] = job
 
     def add_noop(self) -> None:
@@ -379,7 +389,12 @@ def add_base(child: Child, base: dict[str, str], tests: list[dict[str, Any]], va
             for key, value in base.items()
             if key not in {"FAMILY", "NAME", "VARIANT", "TESTED_IMAGE_REF", "VALIDATION_HASH", "STABLE_IMAGE_REF", "GHCR_STABLE_IMAGE_REF", "OCI_CREATED"}
         }
-        child.add_job(build, f".child-{base['FAMILY']}-base-build-template", variables=build_vars)
+        child.add_job(
+            build,
+            f".child-{base['FAMILY']}-base-build-template",
+            variables=build_vars,
+            resource_group=canonical_build_lock(base["CANON_IMAGE_REF"]),
+        )
     if valid:
         add_publish(child, base, [], prefix)
         return None
@@ -443,6 +458,7 @@ def add_app(child: Child, app: dict[str, str], tests: list[dict[str, Any]], base
             build_job,
             f".child-{app['FAMILY']}-app-build-template",
             needs=base_needs,
+            resource_group=canonical_build_lock(app["CANON_IMAGE_REF"]),
             variables={
                 "DOCKERFILE": app["DOCKERFILE"],
                 "CANON_IMAGE_REF": app["CANON_IMAGE_REF"],

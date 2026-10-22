@@ -97,6 +97,8 @@ Runtime environment fragments configure Slingshot-based collective communication
 
 The GitLab entry point is `ci-pipelines/build-alps-extended-images.yaml`. It generates a child pipeline at runtime because the required work depends on registry state: missing canonical images are built, images without a current tested marker are validated, and validated images with stale or missing stable refs are published. If all images are current, the child pipeline contains only a lightweight `no-work-required` job.
 
+Canonical build jobs use project-wide resource-group locks keyed by a SHA-256 hash of the full canonical image reference (registry, repository, and tag). Identical references share a lock across PRs and pipelines; different canonical images can build concurrently, including different versions of the same variant. After acquiring the lock, each job re-checks the registry and skips its build if another pipeline has already published that image. Digest mismatches remain hard failures.
+
 The generated child pipeline can contain these stages:
 
 1. **build-base** — builds missing CUDA and ROCm HPC-extended canonical base images
