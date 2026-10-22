@@ -4,6 +4,9 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -130,6 +133,32 @@ def test_skopeo_login_passes_password_on_stdin(tmp_path):
     assert "--password-stdin" in login_log
     assert "--password secret-token" not in login_log
     assert "STDIN=secret-token" in login_log
+
+
+@pytest.mark.parametrize(
+    ("digest", "expected_status", "build_expected"),
+    [("", 0, True), ("sha256:existing", 0, False), ("__ERROR__", 7, False)],
+)
+def test_build_preflight_preserves_existing_images_and_fails_closed(tmp_path, digest, expected_status, build_expected):
+    canon = "registry/image:canon"
+    env, _ = fake_skopeo_env(tmp_path, {canon: digest} if digest else {})
+    build_output = tmp_path / "build-output"
+    env.update({
+        "IMAGE_PREFIX": "registry/images",
+        "JFROG_USER": "user",
+        "JFROG_KEY": "test-token",
+        "CANON_IMAGE_REF": canon,
+        "BUILD_OUTPUT": str(build_output),
+    })
+    templates = yaml.safe_load((ROOT / "ci-pipelines/child-templates.yaml").read_text())
+    preflight = "\n".join(templates[".child-build-images-template"]["before_script"])
+    result = run_bash(
+        preflight + '\ntouch "$BUILD_OUTPUT"',
+        env=env,
+        check=False,
+    )
+    assert result.returncode == expected_status
+    assert build_output.exists() is build_expected
 
 
 def test_skopeo_require_tested_marker_valid_requires_marker_exists(tmp_path):

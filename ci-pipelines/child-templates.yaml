@@ -58,7 +58,8 @@ include:
 
 # Common build wrapper for generated build jobs. The generated job provides the
 # canonical target ref and selected Dockerfile/build args; the CSCS builder
-# helper reads these variables and performs the podman build/push.
+# helper reads these variables and performs the podman build/push. Generated jobs
+# set a resource-group lock keyed by the full canonical image ref.
 .child-build-images-template:
   variables:
     CUSTOM_REGISTRY_USERNAME: $JFROG_USER
@@ -70,6 +71,15 @@ include:
   before_script:
     - |
       set -euo pipefail
+      # Generation may have raced another pipeline. Check again while holding
+      # the resource-group lock so a queued build cannot overwrite its image.
+      source ci-pipelines/helpers/skopeo.sh
+      skopeo_login
+      canon_digest="$(img_digest "$CANON_IMAGE_REF")"
+      if [[ -n "$canon_digest" ]]; then
+        echo "Canonical image already exists; skipping build: $CANON_IMAGE_REF"
+        exit 0
+      fi
       export OCI_CREATED="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
       export PERSIST_IMAGE_NAME="$CANON_IMAGE_REF"
       echo "Building: $PERSIST_IMAGE_NAME"
