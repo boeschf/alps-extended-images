@@ -14,6 +14,7 @@
 #   CU_NUM              target compute units (default: 228 for MI300A)
 #   MAX_JOBS            maximum parallel build jobs (default: 32)
 #   AITER_JIT_DIR       writable preseeded runtime cache (default: /opt/aiter-jit)
+#   AITER_PATCH_DIR     patches applied in name order (default: /opt/alps/aiter-patches)
 #   ALPS_PACKAGE_HELPERS package helper path (default: /opt/alps/package-helpers.sh)
 
 set -euo pipefail
@@ -25,6 +26,7 @@ GPU_ARCHS="${GPU_ARCHS:?GPU_ARCHS is required}"
 CU_NUM="${CU_NUM-228}"
 MAX_JOBS="${MAX_JOBS:-32}"
 AITER_JIT_DIR="${AITER_JIT_DIR:-/opt/aiter-jit}"
+AITER_PATCH_DIR="${AITER_PATCH_DIR:-/opt/alps/aiter-patches}"
 ALPS_PACKAGE_HELPERS="${ALPS_PACKAGE_HELPERS:-/opt/alps/package-helpers.sh}"
 PIP_CONSTRAINT="${PIP_CONSTRAINT:?PIP_CONSTRAINT is required}"
 
@@ -46,6 +48,17 @@ git clone --depth=1 --branch "${AITER_REF}" --recurse-submodules --shallow-submo
     "${AITER_REPO}" "${src_dir}"
 [[ "$(git -C "${src_dir}" rev-parse HEAD)" == "${AITER_COMMIT}" ]] \
     || { echo "ERROR: ${AITER_REF} did not resolve to ${AITER_COMMIT}" >&2; exit 1; }
+
+[[ -d "${AITER_PATCH_DIR}" ]] \
+    || { echo "ERROR: missing ${AITER_PATCH_DIR}; the app Containerfile must COPY it" >&2; exit 1; }
+shopt -s nullglob
+aiter_patch_files=("${AITER_PATCH_DIR}"/*.patch)
+shopt -u nullglob
+for patch_file in "${aiter_patch_files[@]}"; do
+    echo "Applying AITER patch: ${patch_file}"
+    git -C "${src_dir}" apply --check "${patch_file}"
+    git -C "${src_dir}" apply --verbose "${patch_file}"
+done
 
 cd "${src_dir}"
 pip_install python --no-cache-dir -r requirements.txt
@@ -103,5 +116,5 @@ shopt -u nullglob
 chmod -R a+rwX "${AITER_JIT_DIR}"
 
 installed_version="$(python -c 'import importlib.metadata as m; print(m.version("amd-aiter"))')"
-echo "OK: AITER ${installed_version} (${AITER_COMMIT}) installed; preseeded cache modules: ${baked_modules[*]##*/}"
+echo "OK: AITER ${installed_version} (${AITER_COMMIT}) installed with ${#aiter_patch_files[@]} patch(es); preseeded cache modules: ${baked_modules[*]##*/}"
 rm -rf "${src_dir}" "${dist_dir}"

@@ -25,7 +25,8 @@ UCCL-EP remains its expert-parallel implementation; NIXL is not installed.
 vLLM's `nvidia-cutlass-dsl[cu13]` and `quack-kernels` requirements are retained, enabling the low-latency BF16 router without crossing incompatible CuteDSL APIs.
 The build checks their installed versions against the selected vLLM source's requirements instead of fixed assertions tied to one release.
 
-Both builds constrain Python package installation to the Torch and Triton versions supplied by their canonical base images; the CUDA build also preserves base-provided TorchVision and TorchAudio versions. A final image check rejects dependency resolution that replaces any of those packages. Runtime Python ignores user-site packages (`PYTHONNOUSERSITE=1`). Build-time package installation uses `package-helpers.sh`, which routes pip through the CSCS PyPI proxy without forcing that index on image users. Image labels record the pinned UCCL revision and, where applicable, the AITER revision and Model Streamer version.
+Both builds constrain Python package installation to the Torch and Triton versions supplied by their canonical base images; the CUDA build also preserves base-provided TorchVision and TorchAudio versions.
+A final image check rejects dependency resolution that replaces any of those packages. Runtime Python ignores user-site packages (`PYTHONNOUSERSITE=1`). Build-time package installation uses `package-helpers.sh`, which routes pip through the CSCS PyPI proxy without forcing that index on image users. Image labels record the pinned UCCL revision and, where applicable, the AITER revision and Model Streamer version.
 
 The ROCm app preserves the base SDK's runtime library search order when registering linker paths, while builds use the base-selected development prefix.
 
@@ -50,6 +51,11 @@ The ROCm variant installs [AITER](https://github.com/ROCm/aiter), AMD's AI Tenso
 vLLM defaults `VLLM_ROCM_USE_AITER` to false. Set `VLLM_ROCM_USE_AITER=1` in the EDF or job environment to enable its AITER paths. Kernels not already present in the preseeded image cache are JIT-compiled with `hipcc` on first use.
 
 `AITER_JIT_DIR` defaults to the writable `/opt/aiter-jit` cache, which contains AITER's prebuilt core module and accepts additional runtime-compiled kernels. The ROCm Ray/UCCL CI job imports AITER from this cache. The ROCm-only `aiter` CI job verifies that the image cache is writable, copies it to a private test cache, resolves vLLM's AITER MLA backend, JIT-compiles an RMS-norm kernel, and compares its output with Torch without polluting the shared cache.
+
+The patches in `patches/rocm/aiter/` are applied to the pinned AITER sources at build time, in name order, until they are merged upstream:
+
+- `0001-mi300a-xcd-count.patch`: derive the XCD count from the GPU (6 on MI300A) instead of assuming 8.
+- `0002`/`0003`: tuned fused MoE and blockscale GEMM configs for GLM-5.3 FP8 on MI300A (gfx942, 228 CUs). AITER merges them from `aiter/configs/model_configs/` automatically. The pinned resolver honors `CU_NUM=228` alongside `GPU_ARCHS=gfx942`; the image sets both, so disabling `GPU_ARCHS` is not required.
 
 ## Mooncake (CXI KV transfer)
 
