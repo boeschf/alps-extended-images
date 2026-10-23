@@ -52,6 +52,7 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
 
 COPY Alps-Images/common/package-helpers.sh /opt/alps/package-helpers.sh
 COPY Alps-Images/apps/vllm/sources/install-aiter.sh /opt/alps/install-aiter.sh
+COPY Alps-Images/apps/vllm/patches/rocm/aiter/ /opt/alps/aiter-patches/
 
 COPY Alps-Images/apps/vllm/patches/common/uccl/ /opt/alps-uccl-common-patches/
 COPY Alps-Images/apps/vllm/patches/rocm/uccl/ /opt/alps-uccl-rocm-patches/

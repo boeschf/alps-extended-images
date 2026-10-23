@@ -308,6 +308,57 @@ def test_meta_commit_sha_does_not_change_canonical_refs():
     assert first == second
 
 
+@pytest.mark.parametrize("component", ["aiter", "uccl", "vllm"])
+def test_rocm_component_patches_invalidate_only_rocm_refs_and_validation(tmp_path, component):
+    import shutil
+
+    app = tmp_path / "Alps-Images/apps/vllm"
+    app.mkdir(parents=True)
+    for name in ("profile.env", "Containerfile", "Containerfile.rocm"):
+        shutil.copy2(ROOT / "Alps-Images/apps/vllm" / name, app / name)
+    shutil.copytree(ROOT / "Alps-Images/apps/vllm/patches", app / "patches")
+    (app / "tests").mkdir()
+    common = tmp_path / "Alps-Images/common"
+    common.mkdir(parents=True)
+    shutil.copy2(ROOT / "Alps-Images/common/package-helpers.sh", common)
+    shutil.copytree(
+        ROOT / "ci-pipelines/helpers",
+        tmp_path / "ci-pipelines/helpers",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    shutil.copy2(ROOT / "ci-pipelines/child-templates.yaml", tmp_path / "ci-pipelines")
+    shutil.copy2(ROOT / "Alps-Images/apps/vllm/ci.yaml", app)
+
+    def hashes():
+        result = subprocess.run(
+            ["bash", "-c", r'''
+source ci-pipelines/helpers/skopeo.sh
+source ci-pipelines/helpers/meta.sh
+base_canonical_ref() { printf '%s\n' 'registry/base:fixed-canonical'; }
+for variant in cuda rocm; do
+    app_refs vllm "$variant"
+    app_validation_hash vllm "$variant"
+done
+'''],
+            cwd=tmp_path,
+            env={**os.environ, **meta_env()},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        lines = result.stdout.splitlines()
+        return {variant: (lines[index].split()[2], lines[index + 1]) for variant, index in (("cuda", 0), ("rocm", 2))}
+
+    before = hashes()
+    patch = next((app / "patches/rocm" / component).glob("*.patch"))
+    patch.write_text(patch.read_text() + "\n")
+    after = hashes()
+    assert before["cuda"] == after["cuda"]
+    assert before["rocm"][0] != after["rocm"][0]
+    assert before["rocm"][1] != after["rocm"][1]
+
+
 def test_meta_ngc_canonical_ref_changes_with_profile_inputs():
     profile = ROOT / "Alps-Images" / "NGC" / "pytorch-25.12-py3" / "profile.env"
     original = profile.read_text()
