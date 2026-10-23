@@ -77,7 +77,8 @@ Shared primitives export `LIBFABRIC_PREFIX`, `UCX_PREFIX`, `UCC_PREFIX`, `OMPI_P
 | OSU Micro-benchmarks | 7.5.2 | Point-to-point latency and bandwidth measurements |
 
 CUDA components are compiled with CUDA support and architecture-specific flags for NVIDIA Hopper (SM90/SM90a).
-ROCm components keep the bundled RCCL by default, build aws-ofi-rccl against the Alps libfabric stack, and build rccl-tests for MI250/MI300 targets (`gfx90a`, `gfx942`) using the ROCm SDK from the image profile.
+ROCm components keep the bundled RCCL by default, build aws-ofi-rccl against the Alps libfabric stack, and build rccl-tests for the profile's selected targets: ROCm 7.14 retains MI250/MI300 (`gfx90a`, `gfx942`); the ROCm 10.0 profile targets MI300 (`gfx942`).
+ROCm 10.0 image coverage for `gfx90a` is not established.
 RCCL rebuilds are opt-in with `ROCM_REBUILD_RCCL=1`.
 
 The ROCm 10.0 base ships only runtime SDK wheels (there is no public `rocm-sdk-devel` for ROCm 10), so its profile pins the matching `rocm-libraries` source tag (`ROCM_LIBRARIES_REPO`/`ROCM_LIBRARIES_COMMIT`) and the build generates the missing devel payload from it: CMake package configs for every package torch's `LoadHIP` requires, the public math-library headers, and dev-name library symlinks, mirrored at both `/opt/rocm` and the wheel install prefix.
@@ -86,9 +87,23 @@ ROCm 7.x profiles use the real `rocm-sdk-devel` wheel instead and need no such p
 ROCm build-prefix discovery prefers the complete devel/compatibility view, even when the runtime wheels expose development symlinks.
 Runtime `ldconfig` discovery remains wheel-first so Torch and other consumers do not load duplicate LLVM libraries.
 
-The ROCm 10 compatibility payload includes MIOpen's public C API headers, generated version/export headers and HIP backend configuration in both SDK include layouts. It retains the wheel's MIOpen runtime rather than installing a second copy.
+The ROCm 10 compatibility payload includes MIOpen's public C API headers, generated version/export headers and HIP backend configuration in both SDK include layouts.
+It retains the wheel's MIOpen runtime rather than installing a second copy.
 The build checks the pinned header version against `miopenGetVersion`; base environment validation compiles and links a consumer, creates a GPU handle, and compares an explicit MIOpen convolution with a CPU reference.
 MIOpen's private C++ implementation headers are not installed.
+
+RCCL builds and `rccl-tests` share SDK compiler discovery: prefer `${ROCM_SDK_BIN}/amdclang++`, falling back to `${ROCM_CORE_PREFIX}/lib/llvm/bin/clang++` for wheel-only layouts.
+The test build passes that compiler explicitly to CMake instead of relying on the upstream toolchain's conventional `ROCM_PATH/llvm/bin/amdclang++` path.
+
+The wheel-only layout exposes the SDK's real `lib/llvm/amdgcn` payload through both `/opt/rocm/amdgcn` and `${ROCM_CORE_PREFIX}/amdgcn`.
+The latter is necessary when `ROCM_PATH` explicitly selects the core wheel prefix: clang then searches that prefix for HIP device bitcode rather than falling back to `/opt/rocm`.
+Missing `ocml.bc` or `ockl.bc` stops bootstrap with an explicit error; device-library linking is not disabled.
+
+SDK distributions, including device wheels, must match the profile's ROCm base release; matching nightly/development builds are retained.
+Profiles without pinned compatibility sources install the real devel wheel when it is absent and fail if installation fails.
+Compatibility builds shallow-fetch the pinned sources and derive component versions from their upstream CMake declarations and header templates rather than assigning SDK versions to every library.
+They refuse to replace an existing `/opt/rocm` directory or symlink unless it is an installer-owned compatibility tree.
+ROCm 10-specific rccl-tests compiler workarounds do not modify ROCm 7.14 sources.
 
 Patches for upstream issues in libfabric, NCCL, and aws-ofi-nccl are maintained under `Alps-Images/patches/` and are included in base image hashes.
 Application-specific patches are kept under `Alps-Images/apps/<app>/patches/` and are included in app image hashes.
@@ -106,11 +121,19 @@ NGC images assemble `common/alps-runtime.common.env`, `common/alps-runtime.nccl-
 - **OpenMPI / PMIX**: security modules, byte transfer layer restricted to supported backends
 - **CUDA**: JIT cache disabled for shared-filesystem compatibility
 
+Both shipped ROCm profiles default `NCCL_P2P_DISABLE=1` in Podman and Sarus/Enroot; the earlier runtime-specific exception was removed because the Sarus results were inconclusive.
+Explicit user values, including an empty value, remain unchanged.
+
 ## CI/CD Pipeline
 
 The GitLab entry point is `ci-pipelines/build-alps-extended-images.yaml`.
 It generates a child pipeline at runtime because the required work depends on registry state: missing canonical images are built, images without a current tested marker are validated, and validated images with stale or missing stable refs are published.
 If all images are current, the child pipeline contains only a lightweight `no-work-required` job.
+
+Canonical build jobs use project-wide resource-group locks keyed by a SHA-256 hash of the full canonical image reference (registry, repository, and tag).
+Identical references share a lock across PRs and pipelines; different canonical images can build concurrently, including different versions of the same variant.
+After acquiring the lock, each job re-checks the registry and skips its build if another pipeline has already published that image.
+Digest mismatches remain hard failures.
 
 The generated child pipeline can contain these stages:
 

@@ -15,14 +15,7 @@ cat >> "${runtime_env}" <<'EOF'
 # read-enable, forced cuMem, HMEM or dmabuf disable) helps. Same failure class as the
 # rocm7.14 variant.
 #
-# The flaw is enroot-specific: the identical 2-node collectives workload passed 80/80
-# with P2P enabled under the Sarus suite (podman runtime). Detect the runtime at
-# container start instead of baking the workaround in unconditionally:
-# - Podman-based runtimes (Sarus suite, plain podman) create /run/.containerenv.
-# - Enroot does not, so only there the default disables RCCL P2P.
 # Users can still override by exporting NCCL_P2P_DISABLE (any value, including empty)
 # before the runtime env loads; defvar semantics keep pre-set values untouched.
-if [ ! -f /run/.containerenv ]; then
-  defvar NCCL_P2P_DISABLE "1"
-fi
+defvar NCCL_P2P_DISABLE "1"
 EOF

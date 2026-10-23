@@ -135,11 +135,21 @@ while True:
 @ray.remote(num_gpus=1)
 class Worker:
     def info(self):
+        import ipaddress
         import socket
 
+        # Use stdlib discovery rather than Ray's deprecated node-IP helper.
+        host = socket.gethostname()
+        ip = socket.gethostbyname(host)
+        if ipaddress.ip_address(ip).is_loopback:
+            raise RuntimeError(
+                f"{host} resolves to loopback {ip}; multi-node rendezvous "
+                "requires a node address reachable from the other hosts"
+            )
+
         return {
-            "host": socket.gethostname(),
-            "ip": socket.gethostbyname(socket.gethostname()),
+            "host": host,
+            "ip": ip,
         }
 
     def run(self, rank, world_size, master_addr, master_port):

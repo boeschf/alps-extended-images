@@ -34,6 +34,7 @@ mkdir -p "${AITER_JIT_DIR}"
 cp -r "${baked_dir}/." "${AITER_JIT_DIR}/"
 
 python - <<'PY'
+import os
 import torch
 import aiter
 from vllm._aiter_ops import rocm_aiter_ops
@@ -41,6 +42,15 @@ from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnu
 
 assert torch.cuda.is_available(), "no GPU visible"
 assert rocm_aiter_ops.is_enabled(), "vLLM does not consider AITER enabled"
+from aiter.jit.utils.chip_info import get_build_targets, get_cu_num
+
+expected_cu = int(os.environ["CU_NUM"])
+actual_cu = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+targets = get_build_targets()
+assert actual_cu == expected_cu, (actual_cu, expected_cu)
+assert get_cu_num() == expected_cu, (get_cu_num(), expected_cu)
+assert targets == [("gfx942", expected_cu)], targets
+print(f"OK: AITER targets {targets} match the visible GPU's {actual_cu} CUs")
 backend = MLAPrefillBackendEnum.ROCM_AITER_FA.get_class()
 assert backend.is_available(), "AITER MLA prefill backend unavailable"
 

@@ -2,9 +2,11 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -134,6 +136,32 @@ def test_skopeo_login_passes_password_on_stdin(tmp_path):
     assert "STDIN=secret-token" in login_log
 
 
+@pytest.mark.parametrize(
+    ("digest", "expected_status", "build_expected"),
+    [("", 0, True), ("sha256:existing", 0, False), ("__ERROR__", 7, False)],
+)
+def test_build_preflight_preserves_existing_images_and_fails_closed(tmp_path, digest, expected_status, build_expected):
+    canon = "registry/image:canon"
+    env, _ = fake_skopeo_env(tmp_path, {canon: digest} if digest else {})
+    build_output = tmp_path / "build-output"
+    env.update({
+        "IMAGE_PREFIX": "registry/images",
+        "JFROG_USER": "user",
+        "JFROG_KEY": "test-token",
+        "CANON_IMAGE_REF": canon,
+        "BUILD_OUTPUT": str(build_output),
+    })
+    templates = yaml.safe_load((ROOT / "ci-pipelines/child-templates.yaml").read_text())
+    preflight = "\n".join(templates[".child-build-images-template"]["before_script"])
+    result = run_bash(
+        preflight + '\ntouch "$BUILD_OUTPUT"',
+        env=env,
+        check=False,
+    )
+    assert result.returncode == expected_status
+    assert build_output.exists() is build_expected
+
+
 def test_skopeo_require_tested_marker_valid_requires_marker_exists(tmp_path):
     env, _ = fake_skopeo_env(tmp_path, {"registry/image:canon": "sha256:123"})
     result = run_bash(
@@ -231,10 +259,18 @@ def test_meta_base_refs_return_expected_fields():
     assert len(rocm_fields) == 4
 
 
-def test_meta_app_refs_use_canonical_base_ref():
-    fields = run_meta("app_refs vllm cuda").stdout.split()
+@pytest.mark.parametrize(
+    "family,helper,canonical_index",
+    [("cuda", "ngc_base_refs", 3), ("rocm", "rocm_base_refs", 2)],
+)
+def test_meta_app_refs_use_canonical_base_ref(family, helper, canonical_index):
+    base = run_meta(f"profile_value Alps-Images/apps/vllm/profile.env {family.upper()}_BASE_IMAGE").stdout.strip()
+    image, variant = base.split(":", 1)
+    name = image.removesuffix(f"-{family}")
+    canonical = run_meta(f"{helper} {name} {variant}").stdout.split()[canonical_index]
+    fields = run_meta(f"app_refs vllm {family}").stdout.split()
     assert len(fields) == 4
-    assert re.match(r"localhost/alps-images/pytorch-cuda:26\.07-py3-alps7-dev-[0-9a-f]{32}$", fields[0])
+    assert fields[0] == canonical
 
 
 def test_meta_parse_base_image_rejects_unsupported_format():
@@ -606,3 +642,417 @@ def test_manual_build_generates_both_megatron_targets(tmp_path):
             r'--build-arg BASE_IMAGE="localhost/alps-images/pytorch-cuda:.*-[0-9a-f]{32}"',
             script,
         )
+
+
+def source_rocm(command):
+    return (
+        "set -e; source Alps-Images/ROCm/install-alps-rocm-components.sh; "
+        'die() { printf "%s\\n" "$*" >&2; exit 1; }; '
+        + command
+    )
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink", "dangling-symlink", "marker-symlink"])
+def test_rocm_compat_root_refuses_unmanaged_layout(tmp_path, kind):
+    root = tmp_path / "rocm"
+    vendor = tmp_path / "vendor"
+    vendor.mkdir()
+    sentinel = vendor / "preserve"
+    sentinel.write_text("vendor data")
+    if kind == "directory":
+        root.mkdir()
+        (root / "preserve").write_text("user data")
+    elif kind == "marker-symlink":
+        root.mkdir()
+        marker = tmp_path / "marker"
+        marker.write_text("alps-rocm-compat-v1\n")
+        (root / ".alps-rocm-compat").symlink_to(marker)
+    else:
+        root.symlink_to(vendor if kind == "symlink" else tmp_path / "absent")
+    result = run_bash(source_rocm('recreate_rocm_compat_root "$TEST_ROOT"'), env={"TEST_ROOT": str(root)}, check=False)
+    assert result.returncode != 0
+    assert "Refusing to replace unmanaged ROCm" in result.stderr
+    assert sentinel.read_text() == "vendor data"
+    if kind == "directory":
+        assert (root / "preserve").read_text() == "user data"
+    elif kind.endswith("symlink") and kind != "marker-symlink":
+        assert root.is_symlink()
+
+
+def test_rocm_compat_root_recreates_only_owned_tree(tmp_path):
+    root = tmp_path / "rocm"
+    root.mkdir()
+    (root / ".alps-rocm-compat").write_text("alps-rocm-compat-v1\n")
+    (root / "obsolete").write_text("owned")
+    run_bash(source_rocm('recreate_rocm_compat_root "$TEST_ROOT"'), env={"TEST_ROOT": str(root)})
+    assert not (root / "obsolete").exists()
+    assert (root / ".alps-rocm-compat").read_text() == "alps-rocm-compat-v1\n"
+    assert (root / "include").is_dir()
+
+
+def fake_rocm_distributions(tmp_path, versions):
+    site = tmp_path / "site"
+    site.mkdir()
+    for name, version in versions.items():
+        dist = site / f"{name.replace('-', '_')}-{version}.dist-info"
+        dist.mkdir()
+        (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+    return {"ROCM_PYTHON": sys.executable, "PYTHONPATH": str(site), "ROCM_VERSION": "7.14.0"}
+
+
+@pytest.mark.parametrize(
+    ("installed", "status"),
+    [("7.14.0", 0), ("7.14.0+git.abc123", 0), ("7.14.0a20261015", 0), ("7.14.0.dev0+abc123", 0), ("7.14.0rc2", 0), ("7.13.0", 2), ("7.14.1", 2)],
+)
+def test_rocm_sdk_validates_distribution_release(tmp_path, installed, status):
+    env = fake_rocm_distributions(tmp_path, {"rocm-sdk-core": installed})
+    result = run_bash(source_rocm("rocm_sdk_distribution_present rocm-sdk-core"), env=env, check=False)
+    assert result.returncode == status
+    if status:
+        assert f"installed {installed}, expected ROCm 7.14.0" in result.stderr
+
+
+def test_rocm_sdk_detects_device_distribution_without_importable_module(tmp_path):
+    env = fake_rocm_distributions(tmp_path, {"rocm-sdk-device-gfx942": "7.14.0"})
+    result = run_bash(source_rocm("rocm_sdk_distribution_present rocm-sdk-device-gfx942"), env=env)
+    assert result.returncode == 0
+    missing = run_bash(source_rocm("rocm_sdk_distribution_present rocm-sdk-device-gfx90a"), env=env, check=False)
+    assert missing.returncode == 1
+
+
+@pytest.mark.parametrize("fail_install", [False, True])
+def test_rocm_sdk_installs_absent_devel_and_propagates_network_failure(tmp_path, fail_install):
+    versions = {name: "7.14.0" for name in ("rocm", "rocm-sdk-core", "rocm-sdk-libraries", "rocm-sdk-device-gfx942")}
+    env = fake_rocm_distributions(tmp_path, versions)
+    site = Path(env["PYTHONPATH"])
+    pip = site / "pip"
+    pip.mkdir()
+    (pip / "__init__.py").write_text("")
+    (pip / "__main__.py").write_text(
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['PIP_LOG']).write_text(' '.join(sys.argv[1:]))\n"
+        "if os.environ['FAIL_INSTALL'] == '1':\n"
+        "    sys.exit('network unavailable')\n"
+        "site = Path(os.environ['PYTHONPATH'])\n"
+        "dist = site / 'rocm_sdk_devel-7.14.0.dist-info'\n"
+        "dist.mkdir()\n"
+        "(dist / 'METADATA').write_text('Metadata-Version: 2.1\\nName: rocm-sdk-devel\\nVersion: 7.14.0\\n')\n"
+    )
+    log = tmp_path / "pip.log"
+    env.update({
+        "RCCL_GPU_TARGETS": "gfx942",
+        "ROCM_PYPI_INDEX_URL": "https://example.invalid",
+        "ROCM_LIBRARIES_REPO": "",
+        "ROCM_LIBRARIES_COMMIT": "",
+        "PIP_LOG": str(log),
+        "FAIL_INSTALL": "1" if fail_install else "0",
+    })
+    result = run_bash(source_rocm('install_rocm_sdk_wheels; printf "devel=%s\\n" "$ROCM_HAVE_DEVEL"'), env=env, check=False)
+    assert "rocm-sdk-devel==7.14.0" in log.read_text()
+    if fail_install:
+        assert result.returncode != 0
+        assert "network unavailable" in result.stderr
+        assert "Failed to install required ROCm SDK wheels" in result.stderr
+    else:
+        assert result.returncode == 0
+        assert "devel=yes" in result.stdout
+
+
+def test_rocm_sdk_source_pins_explicitly_allow_missing_devel(tmp_path):
+    versions = {name: "7.14.0" for name in ("rocm", "rocm-sdk-core", "rocm-sdk-libraries", "rocm-sdk-device-gfx942")}
+    env = fake_rocm_distributions(tmp_path, versions)
+    env.update({"RCCL_GPU_TARGETS": "gfx942", "ROCM_LIBRARIES_REPO": "https://example.invalid/pinned.git", "ROCM_LIBRARIES_COMMIT": "a" * 40})
+    result = run_bash(source_rocm('install_rocm_sdk_wheels; printf "devel=%s\\n" "$ROCM_HAVE_DEVEL"'), env=env)
+    assert "devel=no" in result.stdout
+
+
+def test_rocm_build_prefix_uses_development_view_without_reordering_runtime_libraries(tmp_path):
+    core = tmp_path / "core"
+    libraries = tmp_path / "libraries"
+    devel = tmp_path / "devel"
+    # A runtime tree may have enough HIP/HSA files to pass the discovery
+    # probes, but extension builds still need the complete development view.
+    for prefix in (core, devel):
+        for header in (
+            "hip/hip_runtime_api.h", "hip/hip_runtime.h", "hip/hip_version.h",
+            "hsa/hsa.h", "hsa/hsa_ext_amd.h",
+        ):
+            path = prefix / "include" / header
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("/* public header */\n")
+        (prefix / "lib").mkdir()
+        for name in ("libamdhip64.so", "libhsa-runtime64.so", "libhsakmt.so"):
+            (prefix / "lib" / name).write_text("runtime")
+    (libraries / "lib").mkdir(parents=True)
+    (libraries / "lib" / "librccl.so").write_text("runtime")
+    env = {
+        "ROCM_CORE_PREFIX": str(core),
+        "ROCM_LIBRARIES_PREFIX": str(libraries),
+        "ROCM_DEVEL_PREFIX": str(devel),
+    }
+    selected = run_bash(source_rocm("discover_rocm_build_prefix"), env=env)
+    assert Path(selected.stdout.strip()) == devel
+    runtime_dirs = run_bash(source_rocm("rocm_sdk_ldconfig_dirs"), env=env).stdout.splitlines()
+    assert runtime_dirs.index(str(core / "lib")) < runtime_dirs.index(str(devel / "lib"))
+    assert runtime_dirs.index(str(libraries / "lib")) < runtime_dirs.index(str(devel / "lib"))
+
+
+def test_rocm_714_rccl_test_sources_remain_unchanged(tmp_path):
+    source = tmp_path / "projects" / "rccl-tests" / "src"
+    source.mkdir(parents=True)
+    cmake = source / "CMakeLists.txt"
+    original = "add_library(rccl_common OBJECT ${HIP_COMMON_SOURCES})\n"
+    cmake.write_text(original)
+    run_bash(source_rocm("patch_rocm_rccl_test_sources"), env={"ROCM_VERSION": "7.14.0", "ROCM_SYSTEMS_SRC_DIR": str(tmp_path)})
+    assert cmake.read_text() == original
+
+
+def test_rocm_component_versions_come_from_source_templates(tmp_path):
+    source = tmp_path / "source"
+    root = tmp_path / "rocm"
+    templates = {
+        "hipblas": ("library/include/hipblas-version.h.in", "hipblas/hipblas-version.h"),
+        "hipblaslt": ("library/include/hipblaslt-version.h.in", "hipblaslt/hipblaslt-version.h"),
+        "hipsparselt": ("library/include/hipsparselt-version.h.in", "hipsparselt/hipsparselt-version.h"),
+        "hipsparse": ("library/include/hipsparse-version.h.in", "hipsparse/hipsparse-version.h"),
+        "hipsolver": ("library/include/internal/hipsolver-version.h.in", "hipsolver/internal/hipsolver-version.h"),
+        "rocprim": ("rocprim/include/rocprim/rocprim_version.hpp.in", "rocprim/rocprim_version.hpp"),
+        "hipcub": ("hipcub/include/hipcub/hipcub_version.hpp.in", "hipcub/hipcub_version.hpp"),
+        "rocthrust": ("thrust/rocthrust_version.hpp.in", "thrust/rocthrust_version.hpp"),
+        "rocrand": ("library/include/rocrand/rocrand_version.h.in", "rocrand/rocrand_version.h"),
+        "hiprand": ("library/include/hiprand/hiprand_version.h.in", "hiprand/hiprand_version.h"),
+    }
+    for package in [*templates, "rocblas", "rocsolver", "miopen", "hipfft"]:
+        project = source / "projects" / package
+        project.mkdir(parents=True)
+        declaration = 'set(VERSION_STRING "8.2.3")\n'
+        if package == "hipsparselt":
+            declaration = "project(hipsparselt VERSION 0.2.9 LANGUAGES CXX)\n"
+        elif package == "hipblaslt":
+            declaration = 'set(HIPBLASLT_PROJECT_VERSION "1.4.1" CACHE STRING "version")\n'
+        elif package == "miopen":
+            declaration = "rocm_setup_version(VERSION 3.6.0)\n"
+        elif package == "hipfft":
+            declaration = '\n'.join(f'set(HIPFFT_VERSION_{key} "{value}")' for key, value in zip(("MAJOR", "MINOR", "PATCH"), (1, 0, 25)))
+        if package == "hipcub":
+            declaration += "\n".join(f"set(HIPCUB_CCCL_VERSION_{key} {value})" for key, value in zip(("MAJOR", "MINOR", "PATCH"), (2, 8, 2)))
+        if package == "hipsparse":
+            declaration += '\noption(HIPSPARSE_ENABLE_SPMV_BSR "feature" ON)\n'
+        (project / "CMakeLists.txt").write_text(declaration)
+        if package in templates:
+            template = project / templates[package][0]
+            template.parent.mkdir(parents=True, exist_ok=True)
+            content = f"version=@{package}_VERSION_MAJOR@.@{package}_VERSION_MINOR@.@{package}_VERSION_PATCH@\nnumber=@{package}_VERSION_NUMBER@\n"
+            if package == "hipcub":
+                content += "cccl=@HIPCUB_CCCL_VERSION_NUMBER@\n"
+            if package == "hipsparse":
+                content += "#cmakedefine HIPSPARSE_WITH_SPMV_BSR\n"
+                (template.parent / "CMakeLists.txt").write_text("set(HIPSPARSE_WITH_SPMV_BSR ${HIPSPARSE_ENABLE_SPMV_BSR})\n")
+            template.write_text(content)
+    env = {"SOURCE": str(source), "TEST_ROOT": str(root), "ROCM_PYTHON": sys.executable}
+    result = run_bash(source_rocm('generate_rocm_component_metadata "$SOURCE" "$TEST_ROOT"'), env=env)
+    assert "hipsparselt=0.2.9" in result.stdout
+    assert "hipblaslt=1.4.1" in result.stdout
+    assert "hipfft=1.0.25" in result.stdout
+    assert "number=800203" in (root / "include/rocprim/rocprim_version.hpp").read_text()
+    assert "cccl=200802" in (root / "include/hipcub/hipcub_version.hpp").read_text()
+    assert "#define HIPSPARSE_WITH_SPMV_BSR" in (root / "include/hipsparse/hipsparse-version.h").read_text()
+    template = source / "projects/hipblas" / templates["hipblas"][0]
+    template.write_text("@UNKNOWN_VERSION_FIELD@\n")
+    failed = run_bash(source_rocm('generate_rocm_component_metadata "$SOURCE" "$TEST_ROOT"'), env=env, check=False)
+    assert failed.returncode != 0
+    assert "Unknown version template field" in failed.stderr
+
+
+def test_rocm_development_link_is_created_at_real_wheel_location(tmp_path):
+    wheel = tmp_path / "wheel" / "lib"
+    compat = tmp_path / "rocm" / "lib"
+    wheel.mkdir(parents=True)
+    compat.mkdir(parents=True)
+    library = wheel / "libamdhip64.so.7.0"
+    library.write_text("runtime library")
+    (wheel / "libamdhip64.so.7").symlink_to(library.name)
+    runtime_link = compat / "libamdhip64.so.7"
+    runtime_link.symlink_to(wheel / "libamdhip64.so.7")
+    dev_link = compat / "libamdhip64.so"
+    run_bash(
+        source_rocm('link_rocm_development_library "$RUNTIME_LINK" "$DEV_LINK"'),
+        env={"RUNTIME_LINK": str(runtime_link), "DEV_LINK": str(dev_link)},
+    )
+    assert dev_link.resolve() == library
+    assert (wheel / "libamdhip64.so").resolve() == library
+
+
+@pytest.mark.parametrize("mismatch", ["rocm", "rocm-sdk-core", "rocm-sdk-libraries", "rocm-sdk-device-gfx942"])
+def test_rocm_sdk_refuses_mismatched_preinstalled_wheels(tmp_path, mismatch):
+    versions = {name: "7.14.0" for name in ("rocm", "rocm-sdk-core", "rocm-sdk-libraries", "rocm-sdk-device-gfx942")}
+    versions[mismatch] = "7.13.0"
+    env = fake_rocm_distributions(tmp_path, versions)
+    env.update({"RCCL_GPU_TARGETS": "gfx942", "ROCM_LIBRARIES_REPO": "https://example.invalid/pinned.git", "ROCM_LIBRARIES_COMMIT": "a" * 40})
+    result = run_bash(source_rocm("install_rocm_sdk_wheels"), env=env, check=False)
+    assert result.returncode != 0
+    assert f"Incompatible {mismatch}: installed 7.13.0, expected ROCm 7.14.0" in result.stderr
+
+
+def test_new_build_dependency_cleanup_preserves_inherited_multiarch_packages(tmp_path):
+    snapshot = tmp_path / "packages-before.txt"
+    snapshot.write_text("libnuma-dev:amd64\ncmake\n")
+
+    result = run_bash(
+        """
+source Alps-Images/common/package-helpers.sh
+cleanup_apt_build_deps() { printf '%s\\n' "$@"; }
+cleanup_new_apt_build_deps "$SNAPSHOT_FILE" libnuma-dev cmake ninja-build
+""",
+        env={"SNAPSHOT_FILE": str(snapshot)},
+    )
+
+    assert result.stdout.splitlines() == ["ninja-build"]
+
+
+def test_exact_build_package_purge_refuses_reverse_dependency_removal(tmp_path):
+    import shutil
+
+    apt_get = shutil.which("apt-get")
+    if apt_get is None:
+        pytest.skip("requires the real APT dependency solver")
+    status = tmp_path / "status"
+    status.write_text(
+        "\n".join(
+            f"Package: {name}\nStatus: install ok installed\n"
+            "Architecture: all\nVersion: 1.0\n"
+            f"{dependencies}Description: isolated cleanup regression fixture\n"
+            for name, dependencies in (
+                ("libibverbs1", ""),
+                ("librdmacm1", "Depends: libibverbs1\n"),
+                ("libibverbs-dev", "Depends: libibverbs1\n"),
+                ("librdmacm-dev", "Depends: libibverbs-dev, librdmacm1\n"),
+                ("doca-base", "Depends: libibverbs-dev\n"),
+            )
+        )
+    )
+    result = run_bash(
+        r'''
+source Alps-Images/common/package-helpers.sh
+apt_get() {
+    if [[ " $* " != *" --simulate "* ]]; then
+        echo "Unexpected attempt to mutate packages" >&2
+        return 99
+    fi
+    "$REAL_APT_GET" \
+        -o Debug::NoLocking=1 \
+        -o Dir::State::status="$STATUS_FILE" \
+        -o Dir::State::extended_states="$STATE_FILE" \
+        -o Dir::Cache::pkgcache= \
+        -o Dir::Cache::srcpkgcache= \
+        -o Dir::Etc::sourcelist=/dev/null \
+        -o Dir::Etc::sourceparts=- \
+        "$@"
+}
+purge_apt_build_deps_exact libibverbs-dev librdmacm-dev
+''',
+        env={
+            "REAL_APT_GET": apt_get,
+            "STATUS_FILE": str(status),
+            "STATE_FILE": str(tmp_path / "extended_states"),
+        },
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "refusing build-package purge that also removes doca-base" in result.stderr
+    assert "Unexpected attempt to mutate packages" not in result.stderr
+
+
+def test_rocm_device_bitcode_is_reachable_from_explicit_core_root(tmp_path):
+    core = tmp_path / "core"
+    compat = tmp_path / "compat"
+    bitcode = core / "lib" / "llvm" / "amdgcn" / "bitcode"
+    bitcode.mkdir(parents=True)
+    compat.mkdir()
+    for name in ("ocml.bc", "ockl.bc"):
+        (bitcode / name).write_text(name)
+    run_bash(
+        source_rocm('link_rocm_device_libraries "$COMPAT_ROOT"; link_rocm_device_libraries "$COMPAT_ROOT"'),
+        env={"ROCM_CORE_PREFIX": str(core), "COMPAT_ROOT": str(compat)},
+    )
+    # ROCM_PATH explicitly selects the core prefix, not the compatibility root.
+    for prefix in (core, compat):
+        for name in ("ocml.bc", "ockl.bc"):
+            discovered = prefix / "amdgcn" / "bitcode" / name
+            assert discovered.samefile(bitcode / name)
+            assert discovered.read_text() == name
+
+
+@pytest.mark.parametrize("missing", ["ocml.bc", "ockl.bc"])
+def test_rocm_device_layout_rejects_incomplete_bitcode_without_partial_links(tmp_path, missing):
+    core = tmp_path / "core"
+    compat = tmp_path / "compat"
+    bitcode = core / "lib" / "llvm" / "amdgcn" / "bitcode"
+    bitcode.mkdir(parents=True)
+    compat.mkdir()
+    for name in ("ocml.bc", "ockl.bc"):
+        if name != missing:
+            (bitcode / name).write_text(name)
+    result = run_bash(
+        source_rocm('link_rocm_device_libraries "$COMPAT_ROOT"'),
+        env={"ROCM_CORE_PREFIX": str(core), "COMPAT_ROOT": str(compat)},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert str(bitcode) in result.stderr
+    assert not (core / "amdgcn").is_symlink()
+    assert not (compat / "amdgcn").is_symlink()
+
+
+def test_rocm_device_layout_preserves_existing_vendor_directory(tmp_path):
+    core = tmp_path / "core"
+    compat = tmp_path / "compat"
+    bitcode = core / "lib" / "llvm" / "amdgcn" / "bitcode"
+    bitcode.mkdir(parents=True)
+    compat.mkdir()
+    for name in ("ocml.bc", "ockl.bc"):
+        (bitcode / name).write_text(name)
+    vendor = core / "amdgcn"
+    vendor.mkdir()
+    sentinel = vendor / "vendor-owned"
+    sentinel.write_text("preserve")
+    result = run_bash(
+        source_rocm('link_rocm_device_libraries "$COMPAT_ROOT"'),
+        env={"ROCM_CORE_PREFIX": str(core), "COMPAT_ROOT": str(compat)},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert sentinel.read_text() == "preserve"
+    assert not vendor.is_symlink()
+
+
+@pytest.mark.parametrize("devel_executable", [True, False])
+def test_rocm_hip_compiler_prefers_devel_and_falls_back_to_wheel(tmp_path, devel_executable):
+    sdk_bin = tmp_path / "sdk" / "bin"
+    wheel_bin = tmp_path / "core" / "lib" / "llvm" / "bin"
+    sdk_bin.mkdir(parents=True)
+    wheel_bin.mkdir(parents=True)
+    devel = sdk_bin / "amdclang++"
+    wheel = wheel_bin / "clang++"
+    for compiler in (devel, wheel):
+        compiler.write_text("#!/bin/sh\nexit 0\n")
+        compiler.chmod(0o755)
+    if not devel_executable:
+        devel.chmod(0o644)
+    result = run_bash(
+        source_rocm("rocm_hip_cxx_compiler"),
+        env={"ROCM_SDK_BIN": str(sdk_bin), "ROCM_CORE_PREFIX": str(tmp_path / "core")},
+    )
+    assert Path(result.stdout.strip()) == (devel if devel_executable else wheel)
+
+
+def test_rocm_hip_compiler_rejects_missing_sdk_tools(tmp_path):
+    result = run_bash(
+        source_rocm("rocm_hip_cxx_compiler"),
+        env={"ROCM_SDK_BIN": str(tmp_path / "sdk" / "bin"), "ROCM_CORE_PREFIX": str(tmp_path / "core")},
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "No HIP C++ compiler found in ROCm SDK" in result.stderr
+    assert str(tmp_path / "core" / "lib" / "llvm" / "bin") in result.stderr

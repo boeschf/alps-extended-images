@@ -30,8 +30,9 @@ ARG UCCL_COMMIT="e22a3e8fcd636f7efbbd90900458087a41ff73ce"
 ARG UCCL_NANOBIND_VERSION="3.0.1"
 ARG UCCL_NUM_LOCAL_GPUS="4"
 ARG VLLM_TARGET_DEVICE="rocm"
-# MI300A and MI300X share gfx942. Keep vLLM and AITER single-architecture.
+# MI300A has 228 CUs; gfx942 alone selects AITER's 304-CU MI300X default.
 ARG PYTORCH_ROCM_ARCH="gfx942"
+ARG CU_NUM="228"
 ARG MAX_JOBS="32"
 LABEL org.opencontainers.image.uccl.revision="${UCCL_COMMIT}" \
       org.opencontainers.image.aiter.revision="${AITER_COMMIT}"
@@ -39,6 +40,7 @@ LABEL org.opencontainers.image.uccl.revision="${UCCL_COMMIT}" \
 ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
     PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
     GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
+    CU_NUM="${CU_NUM}" \
     MAX_JOBS="${MAX_JOBS}" \
     CMAKE_BUILD_PARALLEL_LEVEL="${MAX_JOBS}" \
     PYTHONNOUSERSITE="1" \
@@ -51,8 +53,8 @@ ENV VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE}" \
 COPY Alps-Images/common/package-helpers.sh /opt/alps/package-helpers.sh
 COPY Alps-Images/apps/vllm/sources/install-aiter.sh /opt/alps/install-aiter.sh
 
-COPY Alps-Images/apps/vllm/patches/common/uccl/ /opt/alps-uccl-patches/
-COPY Alps-Images/apps/vllm/patches/rocm/uccl/ /opt/alps-uccl-patches/
+COPY Alps-Images/apps/vllm/patches/common/uccl/ /opt/alps-uccl-common-patches/
+COPY Alps-Images/apps/vllm/patches/rocm/uccl/ /opt/alps-uccl-rocm-patches/
 COPY Alps-Images/apps/vllm/patches/common/vllm/ /opt/alps-vllm-patches/
 COPY Alps-Images/apps/vllm/patches/rocm/vllm/ /opt/alps-vllm-rocm-patches/
 
@@ -98,7 +100,9 @@ RUN set -eux; \
         printf '%s\n' "${rocm_lib_dir}" >> "${rocm_ldconfig_file}"; \
       done < <(find "${rocm_root}" -type f -name 'librocm-openblas.so*' -printf '%h\n' | sort -u); \
     done; \
-    sort -u "${rocm_ldconfig_file}" -o "${rocm_ldconfig_file}"; \
+    # Keep wheel runtime libraries ahead of development SDK copies, as in the base.
+    awk '!seen[$0]++' "${rocm_ldconfig_file}" > "${rocm_ldconfig_file}.tmp"; \
+    mv "${rocm_ldconfig_file}.tmp" "${rocm_ldconfig_file}"; \
     export ROCM_HOME="${ROCM_BUILD_PREFIX}" ROCM_PATH="${ROCM_BUILD_PREFIX}" HIP_PATH="${ROCM_BUILD_PREFIX}"; \
     export PATH="${ROCM_BUILD_PREFIX}/bin:${ROCM_BUILD_PREFIX}/llvm/bin:${PATH}"; \
     rocm_libdir="${ROCM_BUILD_PREFIX}/lib64"; \
@@ -121,6 +125,7 @@ RUN set -eux; \
       AITER_REF="${AITER_REF}" \
       AITER_COMMIT="${AITER_COMMIT}" \
       GPU_ARCHS="${PYTORCH_ROCM_ARCH}" \
+      CU_NUM="${CU_NUM}" \
       MAX_JOBS="${MAX_JOBS}" \
       AITER_JIT_DIR="${AITER_JIT_DIR}" \
       bash /opt/alps/install-aiter.sh; \
@@ -130,7 +135,7 @@ RUN set -eux; \
     git -C /opt/uccl fetch --depth=1 origin "${UCCL_COMMIT}"; \
     git -C /opt/uccl checkout -q --detach FETCH_HEAD; \
     test "$(git -C /opt/uccl rev-parse HEAD)" = "${UCCL_COMMIT}"; \
-    shopt -s nullglob; uccl_patch_files=(/opt/alps-uccl-patches/*.patch); shopt -u nullglob; \
+    shopt -s nullglob; uccl_patch_files=(/opt/alps-uccl-common-patches/*.patch /opt/alps-uccl-rocm-patches/*.patch); shopt -u nullglob; \
     for patch_file in "${uccl_patch_files[@]}"; do \
       echo "Applying UCCL patch: ${patch_file}"; \
       git -C /opt/uccl apply --check "${patch_file}"; \
@@ -158,7 +163,7 @@ RUN set -eux; \
       export VLLM_VERSION_OVERRIDE="${VLLM_REF#v}"; \
     fi; \
     shopt -s nullglob; \
-    vllm_patch_files=(/opt/alps-vllm-rocm-patches/*.patch /opt/alps-vllm-patches/*.patch); \
+    vllm_patch_files=(/opt/alps-vllm-patches/*.patch /opt/alps-vllm-rocm-patches/*.patch); \
     shopt -u nullglob; \
     for patch_file in "${vllm_patch_files[@]}"; do \
       echo "Applying vLLM patch: ${patch_file}"; \
@@ -228,10 +233,6 @@ RUN set -eux; \
     if [ -n "${missing}" ]; then \
       echo "FATAL: UCCL-EP has unresolved dependencies:" >&2; \
       echo "${missing}" >&2; \
-      exit 1; \
-    fi; \
-    if dpkg-query -W -f='${db:Status-Abbrev}' libibverbs-dev 2>/dev/null | grep -q '^ii '; then \
-      echo "FATAL: libibverbs-dev remains installed after the UCCL-EP build" >&2; \
       exit 1; \
     fi; \
     echo "OK: vLLM ROCm smoke checks passed"

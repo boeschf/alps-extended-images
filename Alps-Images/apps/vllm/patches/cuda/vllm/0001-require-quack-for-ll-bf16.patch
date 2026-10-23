@@ -3,9 +3,9 @@ From: CSCS Alps Images <noreply@cscs.ch>
 Date: Tue, 22 Sep 2026 00:00:00 +0000
 Subject: [PATCH] cute-dsl: require QuACK before enabling ll_bf16
 
-The low-latency BF16 router imports quack when it creates fake tensors. Keep
-its availability probe honest when the image supplies Cutlass but deliberately
-omits quack-kernels.
+The low-latency BF16 router imports quack when it creates fake tensors. Check
+both Cutlass and QuACK before enabling it, including in environments missing
+QuACK. The Alps CUDA image installs both from vLLM's pinned requirements.
 ---
  vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py | 1 +
  1 file changed, 1 insertion(+)
