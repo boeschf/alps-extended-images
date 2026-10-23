@@ -4,17 +4,19 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def run_bash(script, *, env=None, check=True):
+def run_bash(script, *, env=None, check=True, cwd=ROOT):
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
     result = subprocess.run(
         ["bash", "-c", script],
-        cwd=ROOT,
+        cwd=cwd,
         env=merged_env,
         text=True,
         stdout=subprocess.PIPE,
@@ -215,8 +217,11 @@ def test_skopeo_promote_strict_rejects_different_stable(tmp_path):
     assert "refusing to overwrite" in result.stderr
 
 
-def run_meta(command, *, check=True, **extra_env):
-    return run_bash(f"source ci-pipelines/helpers/skopeo.sh; source ci-pipelines/helpers/meta.sh; {command}", env=meta_env(**extra_env), check=check)
+def run_meta(command, *, check=True, cwd=ROOT, **extra_env):
+    return run_bash(
+        f"source ci-pipelines/helpers/skopeo.sh; source ci-pipelines/helpers/meta.sh; {command}",
+        env=meta_env(**extra_env), check=check, cwd=cwd,
+    )
 
 
 def test_meta_base_refs_return_expected_fields():
@@ -362,16 +367,242 @@ def test_manual_build_generates_valid_rocm_app_script(tmp_path):
     assert re.search(r'--build-arg BASE_IMAGE="localhost/alps-images/pytorch-rocm:.*-[0-9a-f]{32}"', script)
 
 
-def test_rocm_base_hash_inputs_cover_rocm_libraries_pins():
-    meta = (ROOT / "ci-pipelines" / "helpers" / "meta.sh").read_text()
-    m = re.search(r'rocm_base_refs\(\) \{.*?content_hash "(.*?)"', meta, re.DOTALL)
-    assert m, "rocm_base_refs content_hash field list not found"
-    fields = m.group(1)
-    assert "ROCM_LIBRARIES_REPO" in fields
-    assert "ROCM_LIBRARIES_COMMIT" in fields
+@pytest.fixture()
+def named_app_root(tmp_path):
+    (tmp_path / "ci-pipelines").symlink_to(ROOT / "ci-pipelines", target_is_directory=True)
+    images = tmp_path / "Alps-Images"
+    images.mkdir()
+    for name in ("NGC", "ROCm", "common", "patches"):
+        (images / name).symlink_to(ROOT / "Alps-Images" / name, target_is_directory=True)
+    app = images / "apps" / "apertus-2"
+    app.mkdir(parents=True)
+    targets = {
+        "megatron-base-cuda": ("pytorch-cuda:25.12-py3", "Containerfile.megatron-base", "tests/megatron-base"),
+        "megatron-cuda": ("pytorch-cuda:26.06-py3", "Containerfile.megatron", "tests/megatron"),
+        "megatron-rocm": (
+            "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13",
+            "Containerfile.megatron.rocm",
+            "tests/rocm",
+        ),
+    }
+    profile = [f'APP_VARIANTS="{" ".join(targets)}"']
+    for target, (base, recipe, test_dir) in targets.items():
+        prefix = target.upper().replace("-", "_")
+        profile.extend([
+            f"{prefix}_BASE_IMAGE={base}",
+            f"{prefix}_CONTAINERFILE={recipe}",
+            f"{prefix}_TEST_DIR={test_dir}",
+        ])
+        (app / recipe).write_text("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n")
+        tests = app / test_dir
+        tests.mkdir(parents=True)
+        (tests / "check-stack.py").write_text("assert True\n")
+    (app / "profile.env").write_text("\n".join(profile) + "\n")
+    (app / "ci.yaml").write_text("tests: {}\n")
+    return tmp_path
 
-    templates = (ROOT / "ci-pipelines" / "child-templates.yaml").read_text()
-    rocm_build = re.search(r"\.child-rocm-base-build-template:.*?DOCKER_BUILD_ARGS: ('.*?')", templates, re.DOTALL)
-    assert rocm_build, ".child-rocm-base-build-template DOCKER_BUILD_ARGS not found"
-    assert "ROCM_LIBRARIES_REPO" in rocm_build.group(1)
-    assert "ROCM_LIBRARIES_COMMIT" in rocm_build.group(1)
+
+def write_named_target_profile(root, targets):
+    profile = root / "Alps-Images/apps/apertus-2/profile.env"
+    lines = [f'APP_VARIANTS="{" ".join(targets)}"']
+    for target, base in targets.items():
+        prefix = target.upper().replace("-", "_")
+        lines.extend([
+            f"{prefix}_BASE_IMAGE={base}",
+            f"{prefix}_CONTAINERFILE=Containerfile.megatron",
+            f"{prefix}_TEST_DIR=tests/megatron",
+        ])
+    profile.write_text("\n".join(lines) + "\n")
+
+
+def test_meta_named_targets_use_the_selected_base(named_app_root):
+    targets = {
+        "megatron-base-cuda": ("cuda", "ngc_base_refs pytorch 25.12-py3", 3, "Containerfile.megatron-base"),
+        "megatron-cuda": ("cuda", "ngc_base_refs pytorch 26.06-py3", 3, "Containerfile.megatron"),
+        "megatron-rocm": (
+            "rocm",
+            "rocm_base_refs pytorch rocm10.0-ubuntu24.04-py3.12-torch2.13",
+            2,
+            "Containerfile.megatron.rocm",
+        ),
+    }
+    for target, (family, command, ref_index, recipe) in targets.items():
+        output = named_app_root / f"{target}.env"
+        run_meta(f"write_app_build_env {output} apertus-2 {target}", cwd=named_app_root)
+        data = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        base_ref = run_meta(command, cwd=named_app_root).stdout.split()[ref_index]
+
+        assert data["FAMILY"] == family
+        assert data["VARIANT"] == target
+        assert data["BASE_IMAGE"] == base_ref
+        assert data["DOCKERFILE"] == f"Alps-Images/apps/apertus-2/{recipe}"
+        assert f"apertus-2-{target}:" in data["CANON_IMAGE_REF"]
+        assert data["TESTED_IMAGE_REF"] == f'{data["CANON_IMAGE_REF"]}-tested-{data["VALIDATION_HASH"]}'
+
+
+@pytest.mark.parametrize(
+    "variants",
+    ["megatron-base-cuda megatron_base-cuda", "megatron-cuda MEGATRON-cuda", "megatron-cuda megatron-cuda"],
+)
+@pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
+def test_meta_rejects_colliding_target_prefixes(named_app_root, variants, helper):
+    profile = named_app_root / "Alps-Images/apps/apertus-2/profile.env"
+    profile.write_text(f'APP_VARIANTS="{variants}"\n')
+
+    result = run_meta(f"{helper} apertus-2 {variants.split()[0]}", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert "share profile prefix" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["megatron", "megatron-base", "megatron-tpu", "cuda-debug", "-cuda", "megatron.rocm"],
+)
+def test_meta_app_refs_reject_invalid_target_names(named_app_root, target):
+    write_named_target_profile(named_app_root, {target: "pytorch-cuda:26.06-py3"})
+
+    result = run_meta(f"app_refs apertus-2 {target}", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert target in result.stderr
+
+
+@pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
+def test_meta_consumers_reject_undeclared_target(named_app_root, helper):
+    write_named_target_profile(named_app_root, {"megatron-cuda": "pytorch-cuda:26.06-py3"})
+
+    result = run_meta(f"{helper} apertus-2 megatron-rocm", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "megatron-rocm" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "target,family,base",
+    [
+        ("cuda", "cuda", "pytorch-cuda:26.06-py3"),
+        ("rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("_team-rocm-stage-cuda", "cuda", "pytorch-cuda:26.06-py3"),
+        ("team-cuda-stage-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+    ],
+)
+def test_meta_build_env_accepts_family_only_and_multi_part_targets(named_app_root, target, family, base):
+    write_named_target_profile(named_app_root, {target: base})
+    output = named_app_root / "build.env"
+
+    run_meta(f"write_app_build_env {output} apertus-2 {target}", cwd=named_app_root)
+
+    data = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert data["VARIANT"] == target
+    assert data["FAMILY"] == family
+    assert f"/pytorch-{family}:" in data["BASE_IMAGE"]
+    assert f"/apertus-2-{target}:" in data["CANON_IMAGE_REF"]
+    assert data["VALIDATION_HASH"]
+    assert data["TESTED_IMAGE_REF"] == f'{data["CANON_IMAGE_REF"]}-tested-{data["VALIDATION_HASH"]}'
+
+
+@pytest.mark.parametrize(
+    "helper,target,base",
+    [
+        ("app_refs", "cuda-stage-rocm", "pytorch-cuda:26.06-py3"),
+        ("app_refs", "cuda", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("app_validation_hash", "rocm-stage-cuda", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("app_validation_hash", "rocm", "pytorch-cuda:26.06-py3"),
+    ],
+)
+def test_meta_consumers_reject_mismatches_in_unselected_targets(named_app_root, helper, target, base):
+    write_named_target_profile(
+        named_app_root,
+        {"megatron-cuda": "pytorch-cuda:26.06-py3", target: base},
+    )
+
+    result = run_meta(f"{helper} apertus-2 megatron-cuda", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert target in result.stderr
+    assert base in result.stderr
+
+
+@pytest.mark.parametrize("failure", ["base-family-mismatch", "missing-validation-input"])
+def test_meta_write_app_build_env_propagates_failures(named_app_root, failure):
+    if failure == "base-family-mismatch":
+        write_named_target_profile(
+            named_app_root,
+            {"megatron-cuda": "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"},
+        )
+    else:
+        (named_app_root / "Alps-Images/apps/apertus-2/ci.yaml").unlink()
+    output = named_app_root / "build.env"
+
+    result = run_meta(f"write_app_build_env {output} apertus-2 megatron-cuda", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert result.stderr
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "target,recipe,test_dir",
+    [
+        ("megatron-base-cuda", "Containerfile.megatron-base", "tests/megatron-base"),
+        ("megatron-cuda", "Containerfile.megatron", "tests/megatron"),
+        ("megatron-rocm", "Containerfile.megatron.rocm", "tests/rocm"),
+    ],
+)
+def test_megatron_hashes_use_the_selected_recipe_and_test_group(named_app_root, target, recipe, test_dir):
+    app = named_app_root / "Alps-Images/apps/apertus-2"
+    targets = ("megatron-base-cuda", "megatron-cuda", "megatron-rocm")
+    refs = {name: run_meta(f"app_refs apertus-2 {name}", cwd=named_app_root).stdout for name in targets}
+    validations = {
+        name: run_meta(f"app_validation_hash apertus-2 {name}", cwd=named_app_root).stdout
+        for name in targets
+    }
+    for relative in (recipe, f"{test_dir}/check-stack.py"):
+        path = app / relative
+        original = path.read_text()
+        path.write_text(original + "\n# Changed hash input.\n")
+        for name in targets:
+            current_ref = run_meta(f"app_refs apertus-2 {name}", cwd=named_app_root).stdout
+            current_validation = run_meta(f"app_validation_hash apertus-2 {name}", cwd=named_app_root).stdout
+            assert (current_ref != refs[name]) == (name == target)
+            assert (current_validation != validations[name]) == (name == target and relative.startswith("tests/"))
+        path.write_text(original)
+
+
+@pytest.mark.parametrize("helper", ["rocm_base_refs pytorch", "write_base_build_env"])
+def test_rocm_base_helpers_preserve_optional_library_variable_scope(tmp_path, helper):
+    variant = "rocm7.14-ubuntu24.04-py3.12-torch2.11"
+    output = tmp_path / "base.env"
+    command = (
+        f"rocm_base_refs pytorch {variant}"
+        if helper == "rocm_base_refs pytorch"
+        else f"write_base_build_env {output} rocm pytorch {variant}"
+    )
+    result = run_meta(
+        f'{command} && printf "\\nLIBRARY_SCOPE=%s,%s\\n" "$ROCM_LIBRARIES_REPO" "$ROCM_LIBRARIES_COMMIT"',
+        ROCM_LIBRARIES_REPO="outer-repo",
+        ROCM_LIBRARIES_COMMIT="outer-commit",
+    )
+
+    assert result.stdout.splitlines()[-1] == "LIBRARY_SCOPE=outer-repo,outer-commit"
+    if output.exists():
+        data = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        profile = f"Alps-Images/ROCm/pytorch-{variant}/profile.env"
+        for key in ("ROCM_LIBRARIES_REPO", "ROCM_LIBRARIES_COMMIT"):
+            assert data[key] == run_meta(f"profile_value {profile} {key}").stdout.strip()
+
+
+def test_manual_build_generates_both_megatron_targets(tmp_path):
+    for target, recipe in (
+        ("megatron-base-cuda", "Containerfile.megatron-base"),
+        ("megatron-cuda", "Containerfile.megatron"),
+    ):
+        script = generate_manual("app", "apertus-2", target, output=tmp_path / f"{target}.sh")
+
+        assert f"Alps-Images/apps/apertus-2/{recipe}" in script
+        assert re.search(
+            r'--build-arg BASE_IMAGE="localhost/alps-images/pytorch-cuda:.*-[0-9a-f]{32}"',
+            script,
+        )
