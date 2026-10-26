@@ -21,8 +21,8 @@ RECIPE = "nemo-rl-apertus-gsm8k"
 
 
 def get_run_id(cluster, job_id):
-    """Stand-in for the keyed hash: 16 hex characters per cluster and job."""
-    return f"{'c' if cluster == 'clariden' else 'd'}{job_id.zfill(15)}"[:16]
+    """Stand-in for the keyed hash: 32 hex characters per cluster and job."""
+    return f"{'c' if cluster == 'clariden' else 'd'}{job_id.zfill(31)}"[:32]
 
 
 def run_file(job_id, **overrides):
@@ -131,10 +131,10 @@ class TestPublishedRecords:
                 },
             ),
         )
-        record = plan.records[f"{RECIPE}/c000000000000007.json"]
+        record = plan.records[f"{RECIPE}/c0000000000000000000000000000007.json"]
         assert record == {
             "schemaVersion": crr.RUN_RECORD_SCHEMA_VERSION,
-            "runId": "c000000000000007",
+            "runId": "c0000000000000000000000000000007",
             "recipeId": RECIPE,
             "cluster": "clariden",
             "startedOn": "2026-10-23",
@@ -167,7 +167,7 @@ class TestPublishedRecords:
                 user="alice",
             ),
         )
-        assert plan.records[f"{RECIPE}/c000000000000007.json"]["result"] == {
+        assert plan.records[f"{RECIPE}/c0000000000000000000000000000007.json"]["result"] == {
             "status": "terminated",
             "exitCode": 143,
             "signal": "TERM",
@@ -178,7 +178,7 @@ class TestPublishedRecords:
 
     def test_booleans_are_not_numbers(self):
         plan = collect_one("7-result.json", result_file("7", exitCode=True, elapsedSeconds=False))
-        result = plan.records[f"{RECIPE}/c000000000000007.json"]["result"]
+        result = plan.records[f"{RECIPE}/c0000000000000000000000000000007.json"]["result"]
         assert result["exitCode"] is None
         assert result["elapsedSeconds"] is None
 
@@ -189,7 +189,7 @@ class TestPlanCollection:
             [("7-result.json", RECENT, None), ("7-run.json", RECENT, None)],
             {"7-run.json": run_file("7"), "7-result.json": result_file("7")},
         )
-        record = plan.records[f"{RECIPE}/c000000000000007.json"]
+        record = plan.records[f"{RECIPE}/c0000000000000000000000000000007.json"]
         assert record["run"]["preset"] == "muon"
         assert record["result"]["status"] == "completed"
         assert sorted(plan.processed) == ["7-result.json", "7-run.json"]
@@ -201,7 +201,7 @@ class TestPlanCollection:
             {"7-result.json": result_file("7", status="failed", exitCode=1)},
             first.records,
         )
-        record = plan.records[f"{RECIPE}/c000000000000007.json"]
+        record = plan.records[f"{RECIPE}/c0000000000000000000000000000007.json"]
         assert record["run"]["preset"] == "muon"
         assert record["result"]["status"] == "failed"
 
@@ -211,8 +211,8 @@ class TestPlanCollection:
             {"7-run.json": run_file("7"), "7-result.json": result_file("7", cluster="daint")},
         )
         assert sorted(plan.records) == [
-            f"{RECIPE}/c000000000000007.json",
-            f"{RECIPE}/d000000000000007.json",
+            f"{RECIPE}/c0000000000000000000000000000007.json",
+            f"{RECIPE}/d0000000000000000000000000000007.json",
         ]
 
     def test_keeps_recent_invalid_or_unreadable_files_and_expires_old_invalid_ones(self):
@@ -232,7 +232,26 @@ class TestPlanCollection:
         # 3 could not be read: retried, never expired; other files are ignored
         assert [name for name, _ in plan.skipped] == ["1-run.json", "3-run.json"]
 
-    def test_rejects_a_run_id_function_that_does_not_return_16_hex_characters(self):
+    def test_rejects_a_result_naming_another_recipe_than_its_run(self):
+        plan = collect(
+            [("7-run.json", RECENT, None), ("7-result.json", OLD, None)],
+            {"7-run.json": run_file("7"), "7-result.json": result_file("7", recipeId="verl-grpo")},
+        )
+        assert list(plan.records) == [f"{RECIPE}/c{'0' * 30}7.json"]
+        assert plan.records[f"{RECIPE}/c{'0' * 30}7.json"]["result"] is None
+        assert plan.expired == [("7-result.json", "recipe does not match the run's other file")]
+
+    def test_checks_the_recipe_against_records_from_earlier_passes(self):
+        first = collect_one("7-run.json", run_file("7"))
+        plan = collect(
+            [("7-result.json", RECENT, None)],
+            {"7-result.json": result_file("7", recipeId="verl-grpo")},
+            first.records,
+        )
+        assert plan.records == {}
+        assert [name for name, _ in plan.skipped] == ["7-result.json"]
+
+    def test_rejects_a_run_id_function_that_does_not_return_32_hex_characters(self):
         with pytest.raises(ValueError):
             crr.plan_collection(
                 [crr.TrackerFile("7-run.json", last_modified=RECENT)],
@@ -255,6 +274,7 @@ class TestRunIndex:
 
     def test_reports_runs_without_result_as_running_then_unknown_after_their_time_limit(self):
         assert crr.parse_time_limit("1-02:00:00").total_seconds() == 26 * 3600
+        assert crr.parse_time_limit("999999999999-00:00:00") is None
         assert crr.get_run_status(self.record("1", "2026-10-23T08:00:00Z", False), NOW) == "running"
         assert crr.get_run_status(self.record("1", "2026-10-19T08:00:00Z", False), NOW) == "unknown"
         assert crr.get_run_status(self.record("1", "2026-10-19T08:00:00Z", True), NOW) == "completed"
@@ -266,8 +286,8 @@ class TestRunIndex:
             {**self.record("3", "2026-10-23T09:00:00Z", False), "recipeId": "verl-grpo"},
         ]
         index = crr.build_run_index(RECIPE, records, NOW)
-        assert [run["runId"] for run in index["runs"]] == ["c000000000000002", "c000000000000001"]
-        assert index["runs"][1]["path"] == f"{RECIPE}/c000000000000001.json"
+        assert [run["runId"] for run in index["runs"]] == ["c0000000000000000000000000000002", "c0000000000000000000000000000001"]
+        assert index["runs"][1]["path"] == f"{RECIPE}/c0000000000000000000000000000001.json"
         assert index["runs"][1]["status"] == "completed"
         assert index["runs"][1]["preset"] == "muon"
         assert index["runs"][1]["hyperparameters"]["MAX_NUM_STEPS"] == 58
@@ -373,3 +393,91 @@ class TestFirecrestErrors:
         self.respond_with(monkeypatch, TimeoutError())
         with pytest.raises(RuntimeError, match="GET ops/download failed: TimeoutError"):
             crr.firecrest(self.CONFIG, "token", "GET", "download", "/tracker/1-run.json")
+
+
+def test_huge_time_limits_are_dropped_instead_of_crashing_the_pass():
+    plan = collect_one("7-run.json", run_file("7", launch={**run_file("7")["launch"], "job": {"timeLimit": "999999999999-00:00:00"}}))
+    record = plan.records[f"{RECIPE}/c{'0' * 30}7.json"]
+    assert record["run"]["timeLimit"] is None
+    assert crr.build_run_index(RECIPE, [record], NOW)["runs"][0]["status"] == "running"
+
+
+class TestLoadRecords:
+    def test_skips_unreadable_or_misplaced_records_with_a_warning(self, tmp_path, capsys):
+        good = collect_one("7-run.json", run_file("7")).records
+        for path, record in good.items():
+            crr.write_json(tmp_path / path, record)
+        (tmp_path / RECIPE / f"{'a' * 32}.json").write_text("{not json")
+        crr.write_json(tmp_path / RECIPE / f"{'b' * 32}.json", {**next(iter(good.values()))})
+        (tmp_path / RECIPE / "index.json").write_text("{}")
+        assert crr.load_records(tmp_path) == good
+        assert "2 existing records could not be read" in capsys.readouterr().out
+
+    def test_a_missing_checkout_ends_the_pass_cleanly(self, tmp_path):
+        with pytest.raises(SystemExit):
+            crr.load_records(tmp_path / "missing")
+
+
+class TestDeletePhase:
+    ENV = {
+        "FIRECREST_URL": "https://firecrest.invalid",
+        "FIRECREST_TOKEN_URL": "https://auth.invalid/token",
+        "FIRECREST_CLIENT_ID": "client",
+        "FIRECREST_CLIENT_SECRET": "not-a-real-secret",
+        "FIRECREST_SYSTEM": "clariden",
+        "RUN_TRACKER_DIR": "/tracker",
+        "RUN_ID_KEY": "k" * 32,
+    }
+
+    @pytest.fixture()
+    def calls(self, monkeypatch):
+        for name, value in self.ENV.items():
+            monkeypatch.setenv(name, value)
+        calls = []
+        monkeypatch.setattr(crr, "get_access_token", lambda config: "token")
+
+        def firecrest(config, access_token, method, operation, path):
+            calls.append((method, operation, path))
+            if path.endswith("/9-run.json"):
+                raise RuntimeError("DELETE ops/rm failed with HTTP 500")
+            return b""
+
+        monkeypatch.setattr(crr, "firecrest", firecrest)
+        return calls
+
+    @staticmethod
+    def manifest(tmp_path, **overrides):
+        path = tmp_path / "manifest.json"
+        data = {"system": "clariden", "trackerDir": "/tracker", "delete": ["7-run.json", "7-result.json"]}
+        crr.write_json(path, {**data, **overrides})
+        return path
+
+    def test_deletes_only_the_listed_tracker_files(self, tmp_path, calls, capsys):
+        names = ["7-run.json", "../7-run.json", "notes.txt", 42, "7-result.json"]
+        crr.delete_processed(self.manifest(tmp_path, delete=names), dry_run=False)
+        assert calls == [
+            ("DELETE", "rm", "/tracker/7-run.json"),
+            ("DELETE", "rm", "/tracker/7-result.json"),
+        ]
+        assert "Deleted 2 of 2 tracker files" in capsys.readouterr().out
+
+    def test_dry_run_deletes_nothing(self, tmp_path, calls, capsys):
+        crr.delete_processed(self.manifest(tmp_path), dry_run=True)
+        assert calls == []
+        assert "Would delete 2 tracker files" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"system": "daint"}, {"trackerDir": "/elsewhere"}, {"delete": "7-run.json"}],
+    )
+    def test_refuses_a_manifest_for_another_system_or_directory(self, tmp_path, calls, overrides):
+        with pytest.raises(SystemExit):
+            crr.delete_processed(self.manifest(tmp_path, **overrides), dry_run=False)
+        assert calls == []
+
+    def test_fails_the_step_when_files_could_not_be_deleted(self, tmp_path, calls, capsys):
+        with pytest.raises(SystemExit) as exit_info:
+            crr.delete_processed(self.manifest(tmp_path, delete=["9-run.json", "7-run.json"]), dry_run=False)
+        assert exit_info.value.code == 1
+        assert len(calls) == 2
+        assert "1 tracker files could not be deleted" in capsys.readouterr().err

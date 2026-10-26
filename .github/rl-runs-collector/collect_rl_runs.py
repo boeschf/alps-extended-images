@@ -67,13 +67,15 @@ FALLBACK_TIME_LIMIT = timedelta(days=7)
 # before a trailing newline
 TRACKER_FILE_PATTERN = re.compile(r"^(\d{1,20})-(run|result)\.json\Z", re.ASCII)
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z", re.ASCII)
-RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{16}\Z", re.ASCII)
+# 128 bits, so that distinct runs never collide
+RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}\Z", re.ASCII)
 PARAMETER_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z", re.ASCII)
 # Metric names may also use ':' as a separator, e.g. val:accuracy
 METRIC_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z", re.ASCII)
 # Short tokens only: no spaces and no slashes, so no free text and no paths
 PARAMETER_STRING_PATTERN = re.compile(r"^[A-Za-z0-9._:+-]{0,64}\Z", re.ASCII)
-TIME_LIMIT_PATTERN = re.compile(r"^(?:(\d+)-)?(\d{1,2}):(\d{2}):(\d{2})\Z", re.ASCII)
+# Slurm time limits are at most a few years; three digits of days is plenty
+TIME_LIMIT_PATTERN = re.compile(r"^(?:(\d{1,3})-)?(\d{1,2}):(\d{2}):(\d{2})\Z", re.ASCII)
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}", re.ASCII)
 MAX_PARAMETERS = 100
 MAX_METRICS = 50
@@ -194,8 +196,10 @@ def _to_metrics(value: Any) -> dict[str, float] | None:
 
 
 def _to_public_run(launch: Json, recipe_id: str) -> Json:
-    job = launch.get("job") if isinstance(launch.get("job"), dict) else {}
-    recipe = launch.get("recipe") if isinstance(launch.get("recipe"), dict) else {}
+    job = launch.get("job")
+    job = job if isinstance(job, dict) else {}
+    recipe = launch.get("recipe")
+    recipe = recipe if isinstance(recipe, dict) else {}
     monitoring = launch.get("monitoring")
     time_limit = job.get("timeLimit")
     return {
@@ -307,6 +311,9 @@ def plan_collection(
     derives the public run id from a cluster and job id.
     """
     plan = CollectionPlan()
+    # A run's two files must name the same recipe: files are untrusted, and a result naming
+    # another recipe would otherwise create a record of its own there
+    recipe_by_run_id = {record["runId"]: record["recipeId"] for record in existing.values()}
 
     def handle_invalid(file: TrackerFile, reason: str) -> None:
         modified = _parse_time(file.last_modified)
@@ -337,7 +344,10 @@ def plan_collection(
             continue
         run_id = get_run_id(parsed.cluster, parsed.job_id)
         if not RUN_ID_PATTERN.match(run_id):
-            raise ValueError("get_run_id must return 16 hex characters")
+            raise ValueError("get_run_id must return 32 hex characters")
+        if recipe_by_run_id.setdefault(run_id, parsed.recipe_id) != parsed.recipe_id:
+            handle_invalid(file, "recipe does not match the run's other file")
+            continue
         path = get_record_path(parsed.recipe_id, run_id)
         current = plan.records.get(path) or existing.get(path)
         plan.records[path] = merge_into_record(current, parsed, run_id)
@@ -353,7 +363,10 @@ def parse_time_limit(time_limit: Any) -> timedelta | None:
     if not match:
         return None
     days, hours, minutes, seconds = match.groups()
-    return timedelta(days=int(days or 0), hours=int(hours), minutes=int(minutes), seconds=int(seconds))
+    try:
+        return timedelta(days=int(days or 0), hours=int(hours), minutes=int(minutes), seconds=int(seconds))
+    except OverflowError:
+        return None
 
 
 def get_run_status(record: Json, now: datetime) -> str:
@@ -403,7 +416,7 @@ def build_run_index(recipe_id: str, records: list[Json], now: datetime) -> Json:
 def make_run_id_function(run_id_key: str) -> Callable[[str, str], str]:
     # Keyed, so that the job id can't be recovered by hashing candidate job ids
     def get_run_id(cluster: str, job_id: str) -> str:
-        return hmac.new(run_id_key.encode(), f"{cluster}:{job_id}".encode(), sha256).hexdigest()[:16]
+        return hmac.new(run_id_key.encode(), f"{cluster}:{job_id}".encode(), sha256).hexdigest()[:32]
 
     return get_run_id
 
@@ -535,14 +548,35 @@ def list_tracker_files(config: Config, access_token: str) -> list[TrackerFile]:
 
 
 def load_records(runs_dir: Path) -> dict[str, Json]:
-    """Existing records in the records checkout, by path relative to it."""
+    """Existing records in the records checkout, by path relative to it.
+
+    A record that can't be read is left out with a warning; collecting a file of its run again
+    rewrites it.
+    """
+    if not runs_dir.is_dir():
+        fail(f"The records checkout {runs_dir} does not exist")
     records = {}
+    unreadable = 0
     for recipe_dir in sorted(runs_dir.iterdir()):
         if not recipe_dir.is_dir() or not is_safe_id(recipe_dir.name):
             continue
         for record_file in sorted(recipe_dir.glob("*.json")):
-            if RUN_ID_PATTERN.match(record_file.stem):
-                records[f"{recipe_dir.name}/{record_file.name}"] = json.loads(record_file.read_text())
+            if not RUN_ID_PATTERN.match(record_file.stem):
+                continue
+            try:
+                record = json.loads(record_file.read_text())
+            except (OSError, ValueError):
+                record = None
+            if (
+                isinstance(record, dict)
+                and record.get("runId") == record_file.stem
+                and record.get("recipeId") == recipe_dir.name
+            ):
+                records[f"{recipe_dir.name}/{record_file.name}"] = record
+            else:
+                unreadable += 1
+    if unreadable:
+        print(f"::warning::{unreadable} existing records could not be read and were left out")
     return records
 
 
@@ -606,11 +640,17 @@ def delete_processed(manifest_path: Path, dry_run: bool) -> None:
         manifest = json.loads(manifest_path.read_text())
     except (OSError, ValueError):
         fail("The manifest of collected files can't be read")
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("delete"), list):
+        fail("The manifest of collected files is malformed")
     config = get_config()
     if manifest.get("system") != config.system or manifest.get("trackerDir") != config.tracker_dir:
         fail("The manifest was written for another system or tracker directory")
     # Only tracker file names, directly in the tracker directory
-    names = [name for name in manifest.get("delete", []) if parse_tracker_file_name(name)]
+    names = [
+        name
+        for name in manifest["delete"]
+        if isinstance(name, str) and parse_tracker_file_name(name)
+    ]
     if dry_run:
         print(f"Would delete {len(names)} tracker files")
         return
@@ -624,7 +664,8 @@ def delete_processed(manifest_path: Path, dry_run: bool) -> None:
             failures += 1
     print(f"Deleted {len(names) - failures} of {len(names)} tracker files")
     if failures:
-        print(f"::warning::{failures} tracker files could not be deleted")
+        # The records are pushed, so nothing is lost, but the files would pile up unnoticed
+        fail(f"{failures} tracker files could not be deleted; the next pass retries them")
 
 
 def main() -> None:
