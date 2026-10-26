@@ -308,38 +308,18 @@ def test_meta_commit_sha_does_not_change_canonical_refs():
     assert first == second
 
 
-@pytest.mark.parametrize("component", ["aiter", "uccl", "vllm"])
-def test_rocm_component_patches_invalidate_only_rocm_refs_and_validation(tmp_path, component):
+@pytest.fixture()
+def isolated_meta_repo(tmp_path):
     import shutil
 
-    app = tmp_path / "Alps-Images/apps/vllm"
-    app.mkdir(parents=True)
-    for name in ("profile.env", "Containerfile", "Containerfile.rocm"):
-        shutil.copy2(ROOT / "Alps-Images/apps/vllm" / name, app / name)
-    shutil.copytree(ROOT / "Alps-Images/apps/vllm/patches", app / "patches")
-    (app / "tests").mkdir()
-    common = tmp_path / "Alps-Images/common"
-    common.mkdir(parents=True)
-    shutil.copy2(ROOT / "Alps-Images/common/package-helpers.sh", common)
-    shutil.copytree(
-        ROOT / "ci-pipelines/helpers",
-        tmp_path / "ci-pipelines/helpers",
-        ignore=shutil.ignore_patterns("__pycache__"),
-    )
+    shutil.copytree(ROOT / "Alps-Images", tmp_path / "Alps-Images", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(ROOT / "ci-pipelines/helpers", tmp_path / "ci-pipelines/helpers", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(ROOT / "ci-pipelines/child-templates.yaml", tmp_path / "ci-pipelines")
-    shutil.copy2(ROOT / "Alps-Images/apps/vllm/ci.yaml", app)
+    shutil.copy2(ROOT / ".dockerignore", tmp_path)
 
-    def hashes():
+    def metadata(command):
         result = subprocess.run(
-            ["bash", "-c", r'''
-source ci-pipelines/helpers/skopeo.sh
-source ci-pipelines/helpers/meta.sh
-base_canonical_ref() { printf '%s\n' 'registry/base:fixed-canonical'; }
-for variant in cuda rocm; do
-    app_refs vllm "$variant"
-    app_validation_hash vllm "$variant"
-done
-'''],
+            ["bash", "-c", "source ci-pipelines/helpers/skopeo.sh; source ci-pipelines/helpers/meta.sh; " + command],
             cwd=tmp_path,
             env={**os.environ, **meta_env()},
             text=True,
@@ -347,16 +327,88 @@ done
             stderr=subprocess.PIPE,
             check=True,
         )
-        lines = result.stdout.splitlines()
+        return result.stdout
+
+    return tmp_path, metadata
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "affected"),
+    [
+        ("patches/rocm/aiter/0001-mi300a-xcd-count.patch", {"rocm"}),
+        ("patches/rocm/uccl/0001-rocm-use-rocr-libfabric-hmem.patch", {"rocm"}),
+        ("patches/rocm/vllm/0001-rocm10-include-cstdint.patch", {"rocm"}),
+        ("patches/cuda/uccl/0001-cuda-allow-explicit-grace-hopper-target.patch", {"cuda"}),
+        ("sources/install-aiter.sh", {"rocm"}),
+        ("sources/build-rocm-env.sh", {"rocm"}),
+        ("sources/build-cuda-env.sh", {"cuda"}),
+        ("sources/install-mooncake.sh", {"cuda", "rocm"}),
+    ],
+)
+def test_app_inputs_invalidate_only_consuming_accelerators(isolated_meta_repo, relative_path, affected):
+    root, metadata = isolated_meta_repo
+
+    def hashes():
+        lines = metadata('for variant in cuda rocm; do app_refs vllm "$variant"; app_validation_hash vllm "$variant"; done').splitlines()
         return {variant: (lines[index].split()[2], lines[index + 1]) for variant, index in (("cuda", 0), ("rocm", 2))}
 
     before = hashes()
-    patch = next((app / "patches/rocm" / component).glob("*.patch"))
-    patch.write_text(patch.read_text() + "\n")
+    path = root / "Alps-Images/apps/vllm" / relative_path
+    path.write_text(path.read_text() + "\n")
     after = hashes()
-    assert before["cuda"] == after["cuda"]
-    assert before["rocm"][0] != after["rocm"][0]
-    assert before["rocm"][1] != after["rocm"][1]
+    for variant in ("cuda", "rocm"):
+        if variant in affected:
+            assert before[variant][0] != after[variant][0]
+            if relative_path.startswith("patches/"):
+                assert before[variant][1] != after[variant][1]
+        else:
+            assert before[variant] == after[variant]
+
+
+def test_app_profile_changes_do_not_invalidate_other_accelerators(isolated_meta_repo):
+    root, metadata = isolated_meta_repo
+    before = {variant: metadata(f"app_refs vllm {variant}") for variant in ("cuda", "rocm")}
+    profile = root / "Alps-Images/apps/vllm/profile.env"
+    profile.write_text(profile.read_text().replace("CUDA_BASE_IMAGE=pytorch-cuda:26.07-py3", "CUDA_BASE_IMAGE=pytorch-cuda:26.06-py3"))
+    assert metadata("app_refs vllm cuda") != before["cuda"]
+    assert metadata("app_refs vllm rocm") == before["rocm"]
+
+
+@pytest.mark.parametrize("patch_rel", ["nccl/net.cc.2.29.7-1.patch", "new-component/nested/fix.patch"])
+def test_base_hashes_cover_all_patch_directories(isolated_meta_repo, patch_rel):
+    root, metadata = isolated_meta_repo
+    cuda_command = "ngc_base_refs pytorch 26.07-py3"
+    rocm_command = "rocm_base_refs pytorch rocm10.0-ubuntu24.04-py3.12-torch2.13"
+    before_cuda, before_rocm = metadata(cuda_command).split()[3], metadata(rocm_command).split()[2]
+    patch = root / "Alps-Images/patches" / patch_rel
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text((patch.read_text() if patch.exists() else "") + "\n")
+    assert metadata(cuda_command).split()[3] != before_cuda
+    assert metadata(rocm_command).split()[2] != before_rocm
+
+
+def test_generated_and_editor_files_do_not_change_image_refs(isolated_meta_repo):
+    root, metadata = isolated_meta_repo
+    command = "ngc_base_refs pytorch 26.07-py3; rocm_base_refs pytorch rocm10.0-ubuntu24.04-py3.12-torch2.13; app_refs vllm cuda; app_refs vllm rocm"
+    before = metadata(command)
+    common = root / "Alps-Images/common"
+    for directory in ("__pycache__", ".pytest_cache", ".git"):
+        target = common / directory
+        target.mkdir(exist_ok=True)
+        (target / "generated").write_text("transient data")
+    (common / "source-alps-env.sh.swp").write_text("editor state")
+    assert metadata(command) == before
+    source = common / "source-alps-env.sh"
+    source.write_text(source.read_text() + "\n")
+    assert metadata(command) != before
+
+
+def test_apps_without_source_lists_still_hash_sources(isolated_meta_repo):
+    root, metadata = isolated_meta_repo
+    before = metadata("app_refs sfttrainer cuda")
+    requirements = root / "Alps-Images/apps/sfttrainer/sources/requirements.txt"
+    requirements.write_text(requirements.read_text() + "\n")
+    assert metadata("app_refs sfttrainer cuda") != before
 
 
 def test_meta_ngc_canonical_ref_changes_with_profile_inputs():

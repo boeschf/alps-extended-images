@@ -15,6 +15,10 @@ Both builds constrain Python package installation to the Torch and Triton versio
 
 `COMMON_PATCH_DIR=patches/common`, `CUDA_PATCH_DIR=patches/cuda`, and `ROCM_PATCH_DIR=patches/rocm` in `profile.env` are recursive hash roots, not patch-application commands. Component subdirectories (`aiter`, `mooncake`, `uccl`, and `vllm`) separate patches for different source trees; the Containerfiles copy the relevant component sets, applying common patches before accelerator-specific patches. AITER patches live under `patches/rocm/aiter/` and are applied before building the ROCm image's AITER wheel and core module. Patch-content changes under one accelerator root invalidate only that accelerator's image and validation hashes; shared patch changes affect both.
 
+The Containerfiles copy each component's patches immediately before its build. Common Python tooling, AITER (ROCm), UCCL, vLLM, Model Streamer (CUDA), and Mooncake have separate build steps, with their version arguments declared where first needed. A vLLM-only patch therefore preserves cached dependency builds; changing an earlier component still rebuilds later layers. Accelerator-specific source lists in `profile.env` keep changes to `sources/install-aiter.sh` and the ROCm build helper out of CUDA hashes.
+
+Each compiled-component step installs and removes its build-only APT packages in the same layer. This repeats package setup on cold builds but avoids retaining deleted compiler packages in lower image layers. Base-provided Torch/Triton constraints and ROCm SDK shell state are restored for each component.
+
 The CUDA vLLM source build uses 64 build jobs and four NVCC threads; its UCCL extension build uses 16 jobs. Alps CI builders reserve 400 GiB. Smaller builders should reduce `MAX_JOBS` and `NVCC_THREADS` with build-argument overrides; `UCCL_MAX_JOBS` is independently configurable.
 
 The two-node CUDA and ROCm CI tests import both UCCL modules, construct a low-latency UCCL-EP buffer across eight GPUs, and verify an identity dispatch/combine round trip. This exercises CXI endpoint setup, GPU-memory registration, and the UCCL data path in addition to the Ray NCCL/RCCL all-reduce.

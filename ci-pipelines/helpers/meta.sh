@@ -24,7 +24,10 @@ hash_paths_stream() {
   # sort -u ensures stable uniqueness if two roots overlap.
   for path in "$@"; do
     if [[ -d "$path" ]]; then
-      find "$path" -type f -print0
+      # Keep cache/editor artifacts out of both hashes and the build context.
+      find "$path" \
+        -type d \( -name .git -o -name __pycache__ -o -name .pytest_cache \) -prune -o \
+        -type f ! -name '*.pyc' ! -name '*.pyo' ! -name '*.swp' ! -name '*.swo' ! -name '*~' -print0
     else
       printf '%s\0' "$path"
     fi
@@ -399,6 +402,7 @@ rocm_base_refs() {
   base_image_ref="$(rocm_base_image_ref "$rocm_name" "$rocm_variant")"
 
   local -a hash_paths=("$dockerfile" "$rocm_installer" "$rocm_components" "$rocm_runtime_env" "$common_dir" "$patches_dir" "$image_dir")
+  [[ ! -f .dockerignore ]] || hash_paths+=(.dockerignore)
   local name="${rocm_name}-rocm"
   local tag="${rocm_variant}-${ALPS_REV}"
   local h
@@ -456,6 +460,7 @@ ngc_base_refs() {
 
   # Compute canonical tag from hashed content
   local -a hash_paths=("$dockerfile" "$ngc_installer" "$ngc_components" "$ngc_runtime_env" "$common_dir" "$patches_dir" "$image_dir")
+  [[ ! -f .dockerignore ]] || hash_paths+=(.dockerignore)
   local name="${ngc_name}-cuda"
   local tag="${ngc_tag}-${ALPS_REV}"
   local h
@@ -666,11 +671,24 @@ app_refs() {
   local base_canon_ref
   base_canon_ref="$(base_canonical_ref "$base_family" "$base_name" "$base_variant")"
 
-  # Compute canonical tag from hashed content
-  local -a hash_paths=("$dockerfile" "$profile_file" "${patch_dirs[@]}" "${test_dirs[@]}")
-  if [[ -d "$sources_dir" ]]; then
+  # Hash the selected profile values, not unrelated accelerator settings.
+  local -a hash_paths=("$dockerfile" "${patch_dirs[@]}" "${test_dirs[@]}")
+  # Explicit file lists narrow accelerator-specific helper inputs. Apps without
+  # lists retain automatic coverage of their complete sources directory.
+  local common_sources variant_sources source_rel
+  common_sources="$(profile_value "$profile_file" COMMON_SOURCE_FILES)"
+  variant_sources="$(profile_value "$profile_file" "${variant_upper}_SOURCE_FILES")"
+  if [[ -n "${common_sources}${variant_sources}" ]]; then
+    local -a source_files=()
+    read -r -a source_files <<< "${common_sources} ${variant_sources}"
+    for source_rel in "${source_files[@]}"; do
+      [[ -f "${app_dir}/${source_rel}" ]] || { echo "ERROR: missing declared source file ${app_dir}/${source_rel}" >&2; return 1; }
+      hash_paths+=("${app_dir}/${source_rel}")
+    done
+  elif [[ -d "$sources_dir" ]]; then
     hash_paths+=("$sources_dir")
   fi
+  [[ ! -f .dockerignore ]] || hash_paths+=(.dockerignore)
   if grep -Fq "$package_helpers" "$dockerfile"; then
     [[ -f "$package_helpers" ]] || { echo "ERROR: missing $package_helpers" >&2; return 1; }
     hash_paths+=("$package_helpers")
@@ -678,7 +696,7 @@ app_refs() {
   local image_name="${app_name}-${app_variant}"
   local tag="${ALPS_REV}"
   local h
-  h="$(content_hash "app_name app_variant image_name tag base_canon_ref CSCS_CI_ORIG_CLONE_URL" "${hash_paths[@]}")"
+  h="$(content_hash "app_name app_variant image_name tag base_image base_canon_ref dockerfile_rel common_test_dir test_dir_rel common_patch_dir patch_dir_rel common_sources variant_sources CSCS_CI_ORIG_CLONE_URL" "${hash_paths[@]}")"
   local canon_ref stable_ref
   read -r canon_ref stable_ref < <(image_refs "$image_name" "$tag" "$h")
 

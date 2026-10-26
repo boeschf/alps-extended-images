@@ -109,7 +109,15 @@ The generated child pipeline can contain these stages:
 6. **mark-app-tested** — creates tested-marker tags for app images that passed the current validation
 7. **publish** — promotes validated images to stable JFrog and GHCR refs while preserving stable-tag immutability rules
 
-**Image tagging strategy:** canonical image tags include deterministic content hashes, allowing the pipeline to detect unchanged inputs and skip unnecessary rebuilds. App hashes include the app accelerator variant, canonical base image ref, selected app Containerfile, `profile.env`, optional declared tests, optional declared app-local patches, and copied shared helper inputs when present. Tested-marker tags have the form `<canonical-tag>-tested-<validation-hash>` and are valid only when they point to the same digest as the canonical image.
+**Image tagging strategy:** canonical image tags include deterministic content hashes, allowing the pipeline to detect unchanged inputs and skip unnecessary rebuilds. App hashes include the accelerator variant, canonical base image ref, selected Containerfile and profile values, declared tests and patches, source files, and copied shared helpers. Base hashes include the selected family/profile, shared stack inputs, and the complete shared patch tree recursively, so new patch directories are covered automatically. The root `.dockerignore` policy is also hashed. Tested-marker tags have the form `<canonical-tag>-tested-<validation-hash>` and are valid only when they point to the same digest as the canonical image.
+
+**Build-cache policy:**
+
+- OCI timestamps and commit metadata are applied after software installation in every base and app image. A final no-op `RUN` makes metadata changes visible to Podman's label cache without rerunning expensive builds. The generator image has only static labels.
+- App profile hashes use only the selected accelerator's settings. Optional `COMMON_SOURCE_FILES` and `<VARIANT>_SOURCE_FILES` are whitespace-separated, app-relative file lists; when either is set, their combined list must cover that variant's copied source files. Otherwise, an existing app `sources/` directory is hashed recursively.
+- The repository-root `.dockerignore` excludes Git metadata, Python caches, and editor scratch files without restricting source directories. These transient files are also excluded from recursive content hashing.
+- Base patch changes can invalidate both accelerator families' canonical refs. Component-specific `COPY` instructions still allow unaffected build layers to be reused.
+- Changing a canonical base or an earlier installed component still invalidates dependent layers. Containerfile and hash-policy changes require a one-time canonical-image rebuild; timestamps and commit SHAs remain excluded from content hashes.
 
 ## Manual Builds
 
