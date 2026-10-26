@@ -4,7 +4,7 @@ name: collect-rl-runs
 # in the run tracker directory on the cluster (<job id>-run.json, <job id>-result.json) into run
 # records on the rl-runs branch: one record per run (<recipe id>/<run id>.json) and an index.json
 # per recipe. Tracker files are deleted once the records are pushed. See
-# rl-runs-collector/collect_rl_runs.py.
+# .github/rl-runs-collector/collect_rl_runs.py.
 #
 # Records contain nothing that identifies a person (no user, account, path, job id or exact
 # time), so they can be public. They live on their own branch so that the collector's commits
@@ -59,7 +59,7 @@ jobs:
       - name: Checkout the collector
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          sparse-checkout: rl-runs-collector
+          sparse-checkout: .github/rl-runs-collector
           persist-credentials: false
 
       - name: Checkout the records
@@ -73,7 +73,7 @@ jobs:
           python-version: '3.12'
 
       - name: Collect tracker files
-        run: python rl-runs-collector/collect_rl_runs.py collect --runs-dir runs --manifest "$MANIFEST"
+        run: python .github/rl-runs-collector/collect_rl_runs.py collect --runs-dir runs --manifest "$MANIFEST"
 
       - name: Commit and push the records
         working-directory: runs
@@ -91,4 +91,4 @@ jobs:
       # Only reached when the push succeeded; files that fail to delete are collected again
       # next time, which is harmless
       - name: Delete collected tracker files
-        run: python rl-runs-collector/collect_rl_runs.py delete --manifest "$MANIFEST"
+        run: python .github/rl-runs-collector/collect_rl_runs.py delete --manifest "$MANIFEST"

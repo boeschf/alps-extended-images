@@ -52,8 +52,8 @@ jobs:
           python -m py_compile ci-pipelines/helpers/generate-child-pipeline.py
           uvx --with pyyaml pytest ci-pipelines/tests
           # The RL run collector is standard library only
-          python -m py_compile rl-runs-collector/collect_rl_runs.py
-          uvx pytest rl-runs-collector/tests
+          python -m py_compile .github/rl-runs-collector/collect_rl_runs.py
+          uvx pytest .github/rl-runs-collector/tests
 
       - name: Shell syntax
         # Catch syntax errors in tracked shell scripts, including sourced helpers.
