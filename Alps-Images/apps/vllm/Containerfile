@@ -205,7 +205,7 @@ COPY Alps-Images/apps/vllm/sources/install-mooncake.sh /opt/alps/install-mooncak
 COPY Alps-Images/apps/vllm/patches/common/mooncake /opt/alps/mooncake-patches
 
 RUN set -eux; \
-    chmod +x /opt/alps/install-mooncake.sh; \
+    chmod u+x /opt/alps/install-mooncake.sh; \
     /opt/alps/install-mooncake.sh cuda
 
 # Tests shipped with the image

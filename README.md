@@ -114,10 +114,27 @@ The generated child pipeline can contain these stages:
 **Build-cache policy:**
 
 - OCI timestamps and commit metadata are applied after software installation in every base and app image. A final no-op `RUN` makes metadata changes visible to Podman's label cache without rerunning expensive builds. The generator image has only static labels.
-- App profile hashes use only the selected accelerator's settings. Optional `COMMON_SOURCE_FILES` and `<VARIANT>_SOURCE_FILES` are whitespace-separated, app-relative file lists; when either is set, their combined list must cover that variant's copied source files. Otherwise, an existing app `sources/` directory is hashed recursively.
+- App profile hashes use only the selected accelerator's settings; see [App profile hash coverage](#app-profile-hash-coverage) for supported keys and source-file defaults.
 - The repository-root `.dockerignore` excludes Git metadata, Python caches, and editor scratch files without restricting source directories. These transient files are also excluded from recursive content hashing.
 - Base patch changes can invalidate both accelerator families' canonical refs. Component-specific `COPY` instructions still allow unaffected build layers to be reused.
 - Changing a canonical base or an earlier installed component still invalidates dependent layers. Containerfile and hash-policy changes require a one-time canonical-image rebuild; timestamps and commit SHAs remain excluded from content hashes.
+
+### App profile hash coverage
+
+`app_refs` reads the following app `profile.env` keys instead of hashing the complete profile file. `<VARIANT>` is the selected accelerator in uppercase, such as `CUDA` or `ROCM`.
+
+| Profile keys | Content-hash coverage |
+| --- | --- |
+| `<VARIANT>_BASE_IMAGE` | Resolved canonical base ref; the raw selector is not hashed separately. |
+| `COMMON_CONTAINERFILE`, `<VARIANT>_CONTAINERFILE` | Effective selected path and file contents; variant override, then common value, then `Containerfile`. |
+| `COMMON_TEST_DIR`, `<VARIANT>_TEST_DIR` | Both declared paths and their recursive contents. |
+| `COMMON_PATCH_DIR`, `<VARIANT>_PATCH_DIR` | Both declared paths and their recursive contents. |
+| `COMMON_SOURCE_FILES`, `<VARIANT>_SOURCE_FILES` | Both selected lists and file contents; if both lists are empty, an existing `sources/` directory is hashed recursively. |
+| `APP_VARIANTS` | Validates variant eligibility; the full list is not hashed, but the selected variant is. |
+
+Source lists are whitespace-separated, app-relative files and must cover every source file copied for that variant. Other logical hash inputs are the app name, selected variant, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`. Containerfile, patch, test, source, copied package-helper, and `.dockerignore` contents are hashed as described above.
+
+When adding a build-affecting profile key, update its reader, hash inputs, this contract, and accelerator-invalidation regression coverage together. Unselected accelerator settings must not invalidate the selected image.
 
 ## Manual Builds
 

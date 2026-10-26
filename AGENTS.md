@@ -72,11 +72,15 @@ This repo builds, tests, and publishes Alps-optimized container images. Preserve
   before their consuming build step. Separate expensive component builds into
   cacheable RUN instructions, ordered dependencies before consumers.
 - Restore shell-local build state in each RUN, including Python constraints
-  and accelerator SDK environment. Install and remove build-only APT packages
-  within the same layer; deleting them later does not reclaim lower-layer bytes.
+  and accelerator SDK environment. Install and remove newly added build-only
+  APT packages within the same layer; deleting them later does not reclaim
+  lower-layer bytes.
 - Keep content-hash coverage conservative. Hash the complete base patch tree
   recursively, not a manually maintained list of component subdirectories.
   Optimize layer reuse through Containerfile boundaries, not omitted hash inputs.
+- When adding a build-affecting app profile key, update its reader, app_refs hash
+  inputs, README profile-key contract, and accelerator-invalidation coverage
+  together.
 - Keep the repository-root .dockerignore focused on transient files, not an
   allowlist of source directories. Keep transient exclusions aligned with
   recursive hashing. Ignore rules are selected by build-context root, not

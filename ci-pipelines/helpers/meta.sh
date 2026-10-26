@@ -696,7 +696,9 @@ app_refs() {
   local image_name="${app_name}-${app_variant}"
   local tag="${ALPS_REV}"
   local h
-  h="$(content_hash "app_name app_variant image_name tag base_image base_canon_ref dockerfile_rel common_test_dir test_dir_rel common_patch_dir patch_dir_rel common_sources variant_sources CSCS_CI_ORIG_CLONE_URL" "${hash_paths[@]}")"
+  # Profile-key coverage and effective/defaulted values are documented in README.md.
+  # Hash the resolved base ref only; base_image is just its profile selector.
+  h="$(content_hash "app_name app_variant image_name tag base_canon_ref dockerfile_rel common_test_dir test_dir_rel common_patch_dir patch_dir_rel common_sources variant_sources CSCS_CI_ORIG_CLONE_URL" "${hash_paths[@]}")"
   local canon_ref stable_ref
   read -r canon_ref stable_ref < <(image_refs "$image_name" "$tag" "$h")
 

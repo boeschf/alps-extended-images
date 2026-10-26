@@ -17,7 +17,7 @@ Both builds constrain Python package installation to the Torch and Triton versio
 
 The Containerfiles copy each component's patches immediately before its build. Common Python tooling, AITER (ROCm), UCCL, vLLM, Model Streamer (CUDA), and Mooncake have separate build steps, with their version arguments declared where first needed. A vLLM-only patch therefore preserves cached dependency builds; changing an earlier component still rebuilds later layers. Accelerator-specific source lists in `profile.env` keep changes to `sources/install-aiter.sh` and the ROCm build helper out of CUDA hashes.
 
-Each compiled-component step installs and removes its build-only APT packages in the same layer. This repeats package setup on cold builds but avoids retaining deleted compiler packages in lower image layers. Base-provided Torch/Triton constraints and ROCm SDK shell state are restored for each component.
+Each compiled-component step installs and removes newly introduced build-only APT packages in the same layer. This repeats package setup on cold builds but avoids retaining deleted compiler packages in lower image layers. Package snapshots normalize multi-arch names so inherited development packages are preserved; the CUDA base's matching RDMA headers remain available until Mooncake's explicit final purge. Only `libibverbs1`, not `libibverbs-dev`, is held during component cleanup. Base-provided Torch/Triton constraints and ROCm SDK shell state are restored for each component.
 
 The CUDA vLLM source build uses 64 build jobs and four NVCC threads; its UCCL extension build uses 16 jobs. Alps CI builders reserve 400 GiB. Smaller builders should reduce `MAX_JOBS` and `NVCC_THREADS` with build-argument overrides; `UCCL_MAX_JOBS` is independently configurable.
 
