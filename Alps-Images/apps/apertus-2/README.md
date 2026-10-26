@@ -267,7 +267,7 @@ No UCCL collective plugin is selected.
 
 **Excluded:** Swiss AI's CUDA/CUTLASS `nv_grouped_gemm` expert-offloading APIs, DeepGEMM FP8 expert offloading, Hopper FA3, FlashInfer, CuPy CUDA wheels, TorchMemorySaver's CUDA preload, and NVIDIA resiliency extensions.
 Native training should use TE experts rather than the custom offloading experts.
-Do not use CUDA expert-offloading configurations with this image; those paths are not supported.
+Do not run `example/chonk.sh` unchanged with this image: it enables those CUDA-only offloading paths and is a 256-node production launcher.
 
 The ROCm target declares three image-local CI checks:
 
@@ -317,6 +317,21 @@ Native extensions use explicit architecture targets, so builds need no visible G
 The generated script selects the canonical, content-addressed base image, which must already exist locally or in the selected registry.
 Keep `IMAGE_PREFIX` and clone-URL inputs consistent when generating base and app scripts.
 See the [manual build guide](../../../manual-build/README.md).
+
+## Run Chonk pretraining
+
+[`example/chonk.sh`](example/chonk.sh) is based on the [Chonk launcher in `swiss-ai/pretrain`](https://github.com/swiss-ai/pretrain/blob/6cb927e8b153e2fe9cd660fe0a6332c2ee7ce2a2/apertus-2/pretraining/chonk/chonk.sh).
+It uses [`environments/chonk.toml`](environments/chonk.toml), which selects `megatron-base-cuda` by its content-addressed tag.
+The Megachonk and LC-extension EDFs select the same minimal target; `environments/megatron.toml` selects the full `megatron-cuda` target.
+Set `CONTAINER_ENV` to use a different EDF.
+
+The CUDA EDF pins use the current canonical refs with the upstream repository clone URL.
+Build and publish those refs before launching; renaming targets does not retag existing images.
+Regenerate pins when their build inputs change.
+
+**This is a production configuration:** training requests 256 nodes and 1,024 GPUs.
+The warm-up requests 32 nodes.
+It is not a small-scale test.
 
 ## Tests
 
