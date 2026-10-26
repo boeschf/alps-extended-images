@@ -256,6 +256,29 @@ def test_meta_base_refs_return_expected_fields():
     assert len(rocm_fields) == 4
 
 
+@pytest.mark.parametrize("helper", ["rocm_base_refs pytorch", "write_base_build_env"])
+def test_rocm_base_helpers_preserve_optional_library_variable_scope(tmp_path, helper):
+    variant = "rocm7.14-ubuntu24.04-py3.12-torch2.11"
+    output = tmp_path / "base.env"
+    command = (
+        f"rocm_base_refs pytorch {variant}"
+        if helper == "rocm_base_refs pytorch"
+        else f"write_base_build_env {output} rocm pytorch {variant}"
+    )
+    result = run_meta(
+        f'{command} && printf "\\nLIBRARY_SCOPE=%s,%s\\n" "$ROCM_LIBRARIES_REPO" "$ROCM_LIBRARIES_COMMIT"',
+        ROCM_LIBRARIES_REPO="outer-repo",
+        ROCM_LIBRARIES_COMMIT="outer-commit",
+    )
+
+    assert result.stdout.splitlines()[-1] == "LIBRARY_SCOPE=outer-repo,outer-commit"
+    if output.exists():
+        data = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        profile = f"Alps-Images/ROCm/pytorch-{variant}/profile.env"
+        for key in ("ROCM_LIBRARIES_REPO", "ROCM_LIBRARIES_COMMIT"):
+            assert data[key] == run_meta(f"profile_value {profile} {key}").stdout.strip()
+
+
 def test_meta_app_refs_use_canonical_base_ref():
     fields = run_meta("app_refs vllm cuda").stdout.split()
     assert len(fields) == 4
@@ -618,12 +641,78 @@ def test_rocm_sdk_source_pins_explicitly_allow_missing_devel(tmp_path):
     assert "devel=no" in result.stdout
 
 
-def test_rocm_build_prefix_order_does_not_change_runtime_order():
-    env = {"ROCM_CORE_PREFIX": "/wheel/core", "ROCM_LIBRARIES_PREFIX": "/wheel/libraries", "ROCM_DEVEL_PREFIX": "/wheel/devel"}
-    runtime = run_bash(source_rocm("rocm_sdk_prefix_candidates"), env=env).stdout.splitlines()
-    build = run_bash(source_rocm("rocm_sdk_prefix_candidates build"), env=env).stdout.splitlines()
-    assert runtime[:3] == ["/wheel/core", "/wheel/libraries", "/opt/rocm"]
-    assert build[:4] == ["/wheel/core", "/wheel/libraries", "/wheel/devel", "/opt/rocm"]
+def test_rocm_build_prefix_uses_development_view_without_reordering_runtime_libraries(tmp_path):
+    core = tmp_path / "core"
+    libraries = tmp_path / "libraries"
+    devel = tmp_path / "devel"
+    # A runtime tree may have enough HIP/HSA files to pass the discovery
+    # probes, but extension builds still need the complete development view.
+    for prefix in (core, devel):
+        for header in (
+            "hip/hip_runtime_api.h", "hip/hip_runtime.h", "hip/hip_version.h",
+            "hsa/hsa.h", "hsa/hsa_ext_amd.h",
+        ):
+            path = prefix / "include" / header
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("/* public header */\n")
+        (prefix / "lib").mkdir()
+        for name in ("libamdhip64.so", "libhsa-runtime64.so", "libhsakmt.so"):
+            (prefix / "lib" / name).write_text("runtime")
+    (libraries / "lib").mkdir(parents=True)
+    (libraries / "lib" / "librccl.so").write_text("runtime")
+    env = {
+        "ROCM_CORE_PREFIX": str(core),
+        "ROCM_LIBRARIES_PREFIX": str(libraries),
+        "ROCM_DEVEL_PREFIX": str(devel),
+    }
+    selected = run_bash(source_rocm("discover_rocm_build_prefix"), env=env)
+    assert Path(selected.stdout.strip()) == devel
+    runtime_dirs = run_bash(source_rocm("rocm_sdk_ldconfig_dirs"), env=env).stdout.splitlines()
+    assert runtime_dirs.index(str(core / "lib")) < runtime_dirs.index(str(devel / "lib"))
+    assert runtime_dirs.index(str(libraries / "lib")) < runtime_dirs.index(str(devel / "lib"))
+
+
+def test_vllm_rocm_build_setup_preserves_runtime_linker_order(tmp_path):
+    core = tmp_path / "z-core"
+    libraries = tmp_path / "zz-libraries"
+    devel = tmp_path / "a-devel"
+    for prefix in (core, libraries, devel):
+        (prefix / "lib").mkdir(parents=True)
+        (prefix / "lib" / "librocm-openblas.so.0").write_text("runtime")
+    alps = tmp_path / "alps"
+    (alps / "env").mkdir(parents=True)
+    (alps / "env" / "alps-rocm-build.env").write_text(
+        f"export ROCM_CORE_PREFIX={core}\n"
+        f"export ROCM_LIBRARIES_PREFIX={libraries}\n"
+        f"export ROCM_DEVEL_PREFIX={devel}\n"
+        f"export ROCM_BUILD_PREFIX={devel}\n"
+    )
+    (alps / "package-helpers.sh").write_text(
+        'snapshot_apt_packages() { printf "inherited:amd64\\n" > "$1"; }\n'
+        "apt_get() { :; }\n"
+    )
+    (alps / "install-alps-hpc-stack.sh").write_text("")
+    (alps / "install-alps-rocm-components.sh").symlink_to(
+        ROOT / "Alps-Images/ROCm/install-alps-rocm-components.sh"
+    )
+    ldconfig = tmp_path / "ldconfig"
+    ldconfig.mkdir()
+    # Relocate container filesystem paths only; execute the real setup and SDK
+    # discovery functions, with package installation isolated from the host.
+    helper = tmp_path / "build-rocm-env.sh"
+    helper.write_text(
+        (ROOT / "Alps-Images/apps/vllm/sources/build-rocm-env.sh").read_text()
+        .replace("/opt/alps", str(alps))
+        .replace("/etc/ld.so.conf.d", str(ldconfig))
+        .replace("/tmp/vllm-apt-before.txt", str(tmp_path / "apt-before.txt"))
+        .replace("/var/lib/apt/lists", str(tmp_path / "apt-lists"))
+    )
+    run_bash(f'set -euo pipefail; source "{helper}"; vllm_build_begin')
+    runtime_dirs = (ldconfig / "99-alps-vllm-rocm-sdk.conf").read_text().splitlines()
+    assert runtime_dirs[:2] == [str(core / "lib"), str(libraries / "lib")]
+    assert runtime_dirs.index(str(core / "lib")) < runtime_dirs.index(str(devel / "lib"))
+    assert runtime_dirs.index(str(libraries / "lib")) < runtime_dirs.index(str(devel / "lib"))
+    assert len(runtime_dirs) == len(set(runtime_dirs))
 
 
 def test_rocm_714_rccl_test_sources_remain_unchanged(tmp_path):

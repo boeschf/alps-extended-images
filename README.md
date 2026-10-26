@@ -73,6 +73,14 @@ CUDA components are compiled with CUDA support and architecture-specific flags f
 
 The ROCm 10.0 base ships only runtime SDK wheels (there is no public `rocm-sdk-devel` for ROCm 10), so its profile pins the matching `rocm-libraries` source tag (`ROCM_LIBRARIES_REPO`/`ROCM_LIBRARIES_COMMIT`) and the build generates the missing devel payload from it: CMake package configs for every package torch's `LoadHIP` requires, the public math-library headers, and dev-name library symlinks, mirrored at both `/opt/rocm` and the wheel install prefix. ROCm 7.x profiles use the real `rocm-sdk-devel` wheel instead and need no such pin.
 
+ROCm build-prefix discovery prefers the complete devel/compatibility view, even when the runtime wheels expose development symlinks.
+Runtime `ldconfig` discovery remains wheel-first so Torch and other consumers do not load duplicate LLVM libraries.
+
+The ROCm 10 compatibility payload includes MIOpen's public C API headers, generated version/export headers and HIP backend configuration in both SDK include layouts.
+It retains the wheel's MIOpen runtime rather than installing a second copy.
+The build checks the pinned header version against `miopenGetVersion`; base environment validation compiles and links a consumer, creates a GPU handle, and compares an explicit MIOpen convolution with a CPU reference.
+MIOpen's private C++ implementation headers are not installed.
+
 RCCL builds and `rccl-tests` share SDK compiler discovery: prefer `${ROCM_SDK_BIN}/amdclang++`, falling back to `${ROCM_CORE_PREFIX}/lib/llvm/bin/clang++` for wheel-only layouts. The test build passes that compiler explicitly to CMake instead of relying on the upstream toolchain's conventional `ROCM_PATH/llvm/bin/amdclang++` path.
 
 The wheel-only layout exposes the SDK's real `lib/llvm/amdgcn` payload through both `/opt/rocm/amdgcn` and `${ROCM_CORE_PREFIX}/amdgcn`. The latter is necessary when `ROCM_PATH` explicitly selects the core wheel prefix: clang then searches that prefix for HIP device bitcode rather than falling back to `/opt/rocm`. Missing `ocml.bc` or `ockl.bc` stops bootstrap with an explicit error; device-library linking is not disabled.
