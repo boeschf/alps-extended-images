@@ -62,3 +62,30 @@ This repo builds, tests, and publishes Alps-optimized container images. Preserve
 
 - `README.md`: user-facing image matrix, runtime behavior, and CI overview.
 - `manual-build/README.md`: local manual build workflow.
+
+## Build Cache
+
+- Declare volatile OCI/commit metadata ARGs only after software installation.
+  Keep the final metadata-only RUN before LABEL: Podman can otherwise reuse
+  stale labels after ARG-only changes.
+- Declare component-specific build ARGs and COPY component inputs immediately
+  before their consuming build step. Separate expensive component builds into
+  cacheable RUN instructions, ordered dependencies before consumers.
+- Restore shell-local build state in each RUN, including Python constraints
+  and accelerator SDK environment. Install and remove newly added build-only
+  APT packages within the same layer; deleting them later does not reclaim
+  lower-layer bytes.
+- Keep content-hash coverage conservative. Hash the complete base patch tree
+  recursively, not a manually maintained list of component subdirectories.
+  Optimize layer reuse through Containerfile boundaries, not omitted hash inputs.
+- When adding a build-affecting app profile key, update its reader, app_refs hash
+  inputs, README profile-key contract, and accelerator-invalidation coverage
+  together.
+- Keep the repository-root .dockerignore focused on transient files, not an
+  allowlist of source directories. Keep transient exclusions aligned with
+  recursive hashing. Ignore rules are selected by build-context root, not
+  Containerfile location.
+- Verify cache changes with a real container engine: metadata-only changes must
+  preserve expensive build layers and refresh labels. Check component-input
+  invalidation separately. Clearly distinguish cache-layout smoke checks from
+  full image builds and GPU workload validation.
