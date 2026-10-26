@@ -38,6 +38,16 @@ bash /tmp/build-vllm-cuda.sh
 
 For app images, the generated script uses the canonical base image reference computed from `profile.env`. If you built that base locally first, keep the default `IMAGE_PREFIX` consistent so the app build can find the local base tag.
 
+App `APP_VARIANTS` entries are flat build targets: `cuda` / `rocm` for family-only apps, otherwise `<variant>-cuda` / `<variant>-rocm`.
+The selected `<TARGET>_BASE_IMAGE` determines the family, and a contradictory target suffix is an error.
+Profile-key prefixes uppercase the target and replace `-` with `_`.
+For example, a hypothetical `app example megatron-cuda` selector would use `MEGATRON_CUDA_BASE_IMAGE` and image name `example-megatron-cuda`; this illustrates the convention, not an available image.
+Existing `app vllm cuda` / `app vllm rocm` selectors remain unchanged.
+
+CI discovery, manual builds, and ref/hash helpers share `app_variants_from_profile` in `ci-pipelines/helpers/meta.sh`.
+Profiles are read as data, not sourced.
+The validator checks target syntax, normalized-prefix collisions, base-family agreement, and requested target membership; Python has no separate naming policy.
+
 ## Useful Overrides
 
 Set `IMAGE_PREFIX` to choose the output namespace:

@@ -12,13 +12,13 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def run_bash(script, *, env=None, check=True):
+def run_bash(script, *, env=None, check=True, cwd=ROOT):
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
     result = subprocess.run(
         ["bash", "-c", script],
-        cwd=ROOT,
+        cwd=cwd,
         env=merged_env,
         text=True,
         stdout=subprocess.PIPE,
@@ -245,8 +245,11 @@ def test_skopeo_promote_strict_rejects_different_stable(tmp_path):
     assert "refusing to overwrite" in result.stderr
 
 
-def run_meta(command, *, check=True, **extra_env):
-    return run_bash(f"source ci-pipelines/helpers/skopeo.sh; source ci-pipelines/helpers/meta.sh; {command}", env=meta_env(**extra_env), check=check)
+def run_meta(command, *, check=True, cwd=ROOT, **extra_env):
+    return run_bash(
+        f"source ci-pipelines/helpers/skopeo.sh; source ci-pipelines/helpers/meta.sh; {command}",
+        env=meta_env(**extra_env), check=check, cwd=cwd,
+    )
 
 
 def test_meta_base_refs_return_expected_fields():
@@ -256,10 +259,18 @@ def test_meta_base_refs_return_expected_fields():
     assert len(rocm_fields) == 4
 
 
-def test_meta_app_refs_use_canonical_base_ref():
-    fields = run_meta("app_refs vllm cuda").stdout.split()
+@pytest.mark.parametrize(
+    "family,helper,canonical_index",
+    [("cuda", "ngc_base_refs", 3), ("rocm", "rocm_base_refs", 2)],
+)
+def test_meta_app_refs_use_canonical_base_ref(family, helper, canonical_index):
+    base = run_meta(f"profile_value Alps-Images/apps/vllm/profile.env {family.upper()}_BASE_IMAGE").stdout.strip()
+    image, variant = base.split(":", 1)
+    name = image.removesuffix(f"-{family}")
+    canonical = run_meta(f"{helper} {name} {variant}").stdout.split()[canonical_index]
+    fields = run_meta(f"app_refs vllm {family}").stdout.split()
     assert len(fields) == 4
-    assert re.match(r"localhost/alps-images/pytorch-cuda:26\.07-py3-alps7-dev-[0-9a-f]{32}$", fields[0])
+    assert fields[0] == canonical
 
 
 def test_meta_parse_base_image_rejects_unsupported_format():
@@ -493,6 +504,299 @@ def test_manual_build_generates_valid_rocm_app_script(tmp_path):
     script = generate_manual("app", "vllm", "rocm", output=tmp_path / "app-rocm.sh")
     assert "Alps-Images/apps/vllm/Containerfile.rocm" in script
     assert re.search(r'--build-arg BASE_IMAGE="localhost/alps-images/pytorch-rocm:.*-[0-9a-f]{32}"', script)
+
+
+@pytest.fixture()
+def named_app_root(tmp_path):
+    (tmp_path / "ci-pipelines").symlink_to(ROOT / "ci-pipelines", target_is_directory=True)
+    images = tmp_path / "Alps-Images"
+    images.mkdir()
+    for name in ("NGC", "ROCm", "common", "patches"):
+        (images / name).symlink_to(ROOT / "Alps-Images" / name, target_is_directory=True)
+    app = images / "apps" / "apertus-2"
+    app.mkdir(parents=True)
+    targets = {
+        "megatron-base-cuda": ("pytorch-cuda:25.12-py3", "Containerfile.megatron-base", "tests/megatron-base"),
+        "megatron-cuda": ("pytorch-cuda:26.06-py3", "Containerfile.megatron", "tests/megatron"),
+        "megatron-rocm": (
+            "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13",
+            "Containerfile.megatron.rocm",
+            "tests/rocm",
+        ),
+    }
+    profile = [f'APP_VARIANTS="{" ".join(targets)}"']
+    for target, (base, recipe, test_dir) in targets.items():
+        prefix = target.upper().replace("-", "_")
+        profile.extend([
+            f"{prefix}_BASE_IMAGE={base}",
+            f"{prefix}_CONTAINERFILE={recipe}",
+            f"{prefix}_TEST_DIR={test_dir}",
+        ])
+        (app / recipe).write_text("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n")
+        tests = app / test_dir
+        tests.mkdir(parents=True)
+        (tests / "check-stack.py").write_text("assert True\n")
+    (app / "profile.env").write_text("\n".join(profile) + "\n")
+    (app / "ci.yaml").write_text("tests: {}\n")
+    return tmp_path
+
+
+def write_named_target_profile(root, targets):
+    profile = root / "Alps-Images/apps/apertus-2/profile.env"
+    lines = [f'APP_VARIANTS="{" ".join(targets)}"']
+    for target, base in targets.items():
+        prefix = target.upper().replace("-", "_")
+        lines.extend([
+            f"{prefix}_BASE_IMAGE={base}",
+            f"{prefix}_CONTAINERFILE=Containerfile.megatron",
+            f"{prefix}_TEST_DIR=tests/megatron",
+        ])
+    profile.write_text("\n".join(lines) + "\n")
+
+
+def test_meta_named_targets_use_the_selected_base(named_app_root):
+    targets = {
+        "megatron-base-cuda": ("cuda", "ngc_base_refs pytorch 25.12-py3", 3, "Containerfile.megatron-base"),
+        "megatron-cuda": ("cuda", "ngc_base_refs pytorch 26.06-py3", 3, "Containerfile.megatron"),
+        "megatron-rocm": (
+            "rocm",
+            "rocm_base_refs pytorch rocm10.0-ubuntu24.04-py3.12-torch2.13",
+            2,
+            "Containerfile.megatron.rocm",
+        ),
+    }
+    for target, (family, command, ref_index, recipe) in targets.items():
+        output = named_app_root / f"{target}.env"
+        run_meta(f"write_app_build_env {output} apertus-2 {target}", cwd=named_app_root)
+        data = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        base_ref = run_meta(command, cwd=named_app_root).stdout.split()[ref_index]
+
+        assert data["FAMILY"] == family
+        assert data["VARIANT"] == target
+        assert data["BASE_IMAGE"] == base_ref
+        assert data["DOCKERFILE"] == f"Alps-Images/apps/apertus-2/{recipe}"
+        assert f"apertus-2-{target}:" in data["CANON_IMAGE_REF"]
+        assert data["TESTED_IMAGE_REF"] == f'{data["CANON_IMAGE_REF"]}-tested-{data["VALIDATION_HASH"]}'
+
+
+@pytest.mark.parametrize(
+    "variants",
+    ["megatron-base-cuda megatron_base-cuda", "megatron-cuda MEGATRON-cuda", "megatron-cuda megatron-cuda"],
+)
+@pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
+def test_meta_rejects_colliding_target_prefixes(named_app_root, variants, helper):
+    profile = named_app_root / "Alps-Images/apps/apertus-2/profile.env"
+    profile.write_text(f'APP_VARIANTS="{variants}"\n')
+
+    result = run_meta(f"{helper} apertus-2 {variants.split()[0]}", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert "share profile prefix" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["megatron", "megatron-base", "megatron-tpu", "cuda-debug", "-cuda", "megatron.rocm"],
+)
+def test_meta_app_refs_reject_invalid_target_names(named_app_root, target):
+    write_named_target_profile(named_app_root, {target: "pytorch-cuda:26.06-py3"})
+
+    result = run_meta(f"app_refs apertus-2 {target}", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert target in result.stderr
+
+
+@pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
+def test_meta_consumers_reject_undeclared_target(named_app_root, helper):
+    write_named_target_profile(named_app_root, {"megatron-cuda": "pytorch-cuda:26.06-py3"})
+
+    result = run_meta(f"{helper} apertus-2 megatron-rocm", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "megatron-rocm" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "target,family,base",
+    [
+        ("cuda", "cuda", "pytorch-cuda:26.06-py3"),
+        ("rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("_team-rocm-stage-cuda", "cuda", "pytorch-cuda:26.06-py3"),
+        ("team-cuda-stage-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+    ],
+)
+def test_meta_build_env_accepts_family_only_and_multi_part_targets(named_app_root, target, family, base):
+    write_named_target_profile(named_app_root, {target: base})
+    output = named_app_root / "build.env"
+
+    run_meta(f"write_app_build_env {output} apertus-2 {target}", cwd=named_app_root)
+
+    data = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert data["VARIANT"] == target
+    assert data["FAMILY"] == family
+    assert f"/pytorch-{family}:" in data["BASE_IMAGE"]
+    assert f"/apertus-2-{target}:" in data["CANON_IMAGE_REF"]
+    assert data["VALIDATION_HASH"]
+    assert data["TESTED_IMAGE_REF"] == f'{data["CANON_IMAGE_REF"]}-tested-{data["VALIDATION_HASH"]}'
+
+
+@pytest.mark.parametrize(
+    "helper,target,base",
+    [
+        ("app_refs", "cuda-stage-rocm", "pytorch-cuda:26.06-py3"),
+        ("app_refs", "cuda", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("app_validation_hash", "rocm-stage-cuda", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("app_validation_hash", "rocm", "pytorch-cuda:26.06-py3"),
+    ],
+)
+def test_meta_consumers_reject_mismatches_in_unselected_targets(named_app_root, helper, target, base):
+    write_named_target_profile(
+        named_app_root,
+        {"megatron-cuda": "pytorch-cuda:26.06-py3", target: base},
+    )
+
+    result = run_meta(f"{helper} apertus-2 megatron-cuda", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert target in result.stderr
+    assert base in result.stderr
+
+
+@pytest.mark.parametrize("failure", ["base-family-mismatch", "missing-validation-input"])
+def test_meta_write_app_build_env_propagates_failures(named_app_root, failure):
+    if failure == "base-family-mismatch":
+        write_named_target_profile(
+            named_app_root,
+            {"megatron-cuda": "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"},
+        )
+    else:
+        (named_app_root / "Alps-Images/apps/apertus-2/ci.yaml").unlink()
+    output = named_app_root / "build.env"
+
+    result = run_meta(f"write_app_build_env {output} apertus-2 megatron-cuda", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert result.stderr
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "target,recipe,test_dir",
+    [
+        ("megatron-base-cuda", "Containerfile.megatron-base", "tests/megatron-base"),
+        ("megatron-cuda", "Containerfile.megatron", "tests/megatron"),
+        ("megatron-rocm", "Containerfile.megatron.rocm", "tests/rocm"),
+    ],
+)
+def test_megatron_hashes_use_the_selected_recipe_and_test_group(named_app_root, target, recipe, test_dir):
+    app = named_app_root / "Alps-Images/apps/apertus-2"
+    targets = ("megatron-base-cuda", "megatron-cuda", "megatron-rocm")
+    refs = {name: run_meta(f"app_refs apertus-2 {name}", cwd=named_app_root).stdout for name in targets}
+    validations = {
+        name: run_meta(f"app_validation_hash apertus-2 {name}", cwd=named_app_root).stdout
+        for name in targets
+    }
+    for relative in (recipe, f"{test_dir}/check-stack.py"):
+        path = app / relative
+        original = path.read_text()
+        path.write_text(original + "\n# Changed hash input.\n")
+        for name in targets:
+            current_ref = run_meta(f"app_refs apertus-2 {name}", cwd=named_app_root).stdout
+            current_validation = run_meta(f"app_validation_hash apertus-2 {name}", cwd=named_app_root).stdout
+            assert (current_ref != refs[name]) == (name == target)
+            assert (current_validation != validations[name]) == (name == target and relative.startswith("tests/"))
+        path.write_text(original)
+
+
+@pytest.mark.parametrize(
+    "source,affected",
+    [
+        ("shared.sh", {"megatron-base-cuda", "megatron-cuda", "megatron-rocm"}),
+        ("base.sh", {"megatron-base-cuda"}),
+        ("cuda.sh", {"megatron-cuda"}),
+        ("rocm.sh", {"megatron-rocm"}),
+        ("unused.sh", set()),
+    ],
+)
+def test_named_target_source_lists_hash_only_selected_inputs(named_app_root, source, affected):
+    app = named_app_root / "Alps-Images/apps/apertus-2"
+    sources = app / "sources"
+    sources.mkdir()
+    for name in ("shared.sh", "base.sh", "cuda.sh", "rocm.sh", "unused.sh"):
+        (sources / name).write_text(f"# {name}\n")
+    profile = app / "profile.env"
+    profile.write_text(
+        profile.read_text()
+        + "COMMON_SOURCE_FILES=sources/shared.sh\n"
+        + "MEGATRON_BASE_CUDA_SOURCE_FILES=sources/base.sh\n"
+        + "MEGATRON_CUDA_SOURCE_FILES=sources/cuda.sh\n"
+        + "MEGATRON_ROCM_SOURCE_FILES=sources/rocm.sh\n"
+    )
+    targets = ("megatron-base-cuda", "megatron-cuda", "megatron-rocm")
+    before = {target: run_meta(f"app_refs apertus-2 {target}", cwd=named_app_root).stdout for target in targets}
+    (sources / source).write_text("# changed source\n")
+
+    for target in targets:
+        after = run_meta(f"app_refs apertus-2 {target}", cwd=named_app_root).stdout
+        assert (after != before[target]) == (target in affected)
+
+
+def test_named_target_hashes_use_effective_selected_profile_values(named_app_root):
+    app = named_app_root / "Alps-Images/apps/apertus-2"
+    profile = app / "profile.env"
+    original = profile.read_text()
+    command = "app_refs apertus-2 megatron-cuda"
+    before = run_meta(command, cwd=named_app_root).stdout
+    profile.write_text(
+        original.replace(
+            'APP_VARIANTS="megatron-base-cuda megatron-cuda megatron-rocm"',
+            'APP_VARIANTS="megatron-rocm megatron-cuda"',
+        ).replace(
+            "MEGATRON_CUDA_CONTAINERFILE=Containerfile.megatron",
+            "COMMON_CONTAINERFILE=Containerfile.megatron",
+        ).replace(
+            "MEGATRON_ROCM_BASE_IMAGE=pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13",
+            "MEGATRON_ROCM_BASE_IMAGE=pytorch-rocm:rocm7.14-ubuntu24.04-py3.12-torch2.11",
+        )
+    )
+
+    assert run_meta(command, cwd=named_app_root).stdout == before
+    profile.write_text(
+        profile.read_text().replace(
+            "MEGATRON_CUDA_BASE_IMAGE=pytorch-cuda:26.06-py3",
+            "MEGATRON_CUDA_BASE_IMAGE=pytorch-cuda:25.12-py3",
+        )
+    )
+    assert run_meta(command, cwd=named_app_root).stdout != before
+
+
+def test_named_target_recursive_sources_exclude_transients_and_cover_dockerignore(named_app_root):
+    app = named_app_root / "Alps-Images/apps/apertus-2"
+    sources = app / "sources"
+    sources.mkdir()
+    nested = sources / "nested"
+    nested.mkdir()
+    source = nested / "install.sh"
+    source.write_text("# source\n")
+    dockerignore = named_app_root / ".dockerignore"
+    dockerignore.write_text(".git\n__pycache__\n")
+    command = "app_refs apertus-2 megatron-cuda"
+    before = run_meta(command, cwd=named_app_root).stdout
+    for directory in (".git", "__pycache__", ".pytest_cache"):
+        transient = sources / directory
+        transient.mkdir()
+        (transient / "generated").write_text("cache\n")
+    for name in ("install.pyc", "install.pyo", "install.sh.swp", "install.sh.swo", "install.sh~"):
+        (nested / name).write_text("transient\n")
+
+    assert run_meta(command, cwd=named_app_root).stdout == before
+    source.write_text("# changed source\n")
+    changed_source = run_meta(command, cwd=named_app_root).stdout
+    assert changed_source != before
+    dockerignore.write_text(dockerignore.read_text() + ".pytest_cache\n")
+    assert run_meta(command, cwd=named_app_root).stdout != changed_source
 
 
 def source_rocm(command):
