@@ -59,6 +59,9 @@ MAX_TRACKER_FILE_SIZE = 1024 * 1024
 # A run without a result this long after its time limit ran out is reported as unknown. Start
 # days are only known to the day, so the margin covers a full day more.
 OVERDUE_MARGIN = timedelta(days=2)
+# Ceiling for runs whose time limit isn't known (launches always record one, so only for
+# malformed files)
+FALLBACK_TIME_LIMIT = timedelta(days=7)
 
 # ASCII only (\d also matches other scripts' digits), and \Z rather than $, which also matches
 # before a trailing newline
@@ -246,7 +249,9 @@ def parse_tracker_file(name: str, content: str) -> ParsedTrackerFile | str:
         errors.append("jobId does not match the file name")
     if not is_safe_id(data.get("cluster")):
         errors.append("missing or invalid cluster")
-    launch = data.get("launch") if isinstance(data.get("launch"), dict) else None
+    launch = data.get("launch")
+    if not isinstance(launch, dict):
+        launch = None
     if kind == "run":
         recipe_id = _id_of(launch.get("recipe")) if launch else None
     else:
@@ -355,9 +360,9 @@ def get_run_status(record: Json, now: datetime) -> str:
     if record.get("result"):
         return record["result"]["status"]
     started_on = _parse_time(record.get("startedOn"))
-    time_limit = parse_time_limit((record.get("run") or {}).get("timeLimit"))
-    if started_on and time_limit is not None:
-        return "unknown" if now > started_on + time_limit + OVERDUE_MARGIN else "running"
+    time_limit = parse_time_limit((record.get("run") or {}).get("timeLimit")) or FALLBACK_TIME_LIMIT
+    if started_on and now > started_on + time_limit + OVERDUE_MARGIN:
+        return "unknown"
     return "running"
 
 
@@ -462,12 +467,16 @@ def get_access_token(config: Config) -> str:
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
+    # Errors are reported without details: neither the request nor the response is logged
     try:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            access_token = json.load(response).get("access_token")
+            data = json.load(response)
     except urllib.error.HTTPError as error:
         fail(f"Token request failed with HTTP {error.code}")
-    if not access_token:
+    except (OSError, ValueError) as error:
+        fail(f"Token request failed: {type(error).__name__}")
+    access_token = data.get("access_token") if isinstance(data, dict) else None
+    if not isinstance(access_token, str) or not access_token:
         fail("Token response has no access_token")
     return access_token
 
@@ -480,24 +489,49 @@ def firecrest(config: Config, access_token: str, method: str, operation: str, pa
         method=method,
         headers={"Authorization": f"Bearer {access_token}"},
     )
+    # FirecREST v2 returns the raw file content for ops/download (not base64 in JSON as v1 did)
     try:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             return response.read()
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"{method} ops/{operation} failed with HTTP {error.code}") from None
+    except OSError as error:
+        # URLError, timeouts and connection errors
+        raise RuntimeError(f"{method} ops/{operation} failed: {type(error).__name__}") from None
+
+
+def parse_listing(content: bytes) -> list[TrackerFile]:
+    """The tracker files in an ops/ls response, which is {"output": [File, ...]}."""
+    listing = json.loads(content)
+    entries = listing.get("output") if isinstance(listing, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError("unexpected ops/ls response")
+    files = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("type") != "-":
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not parse_tracker_file_name(name):
+            continue
+        size = entry.get("size")
+        last_modified = entry.get("lastModified")
+        files.append(
+            TrackerFile(
+                name=name,
+                size=int(size) if isinstance(size, (int, str)) and str(size).isdigit() else None,
+                last_modified=last_modified if isinstance(last_modified, str) else None,
+            )
+        )
+    return files
 
 
 def list_tracker_files(config: Config, access_token: str) -> list[TrackerFile]:
-    listing = json.loads(firecrest(config, access_token, "GET", "ls", config.tracker_dir))
-    return [
-        TrackerFile(
-            name=entry["name"],
-            size=int(entry["size"]) if entry.get("size") is not None else None,
-            last_modified=entry.get("lastModified"),
-        )
-        for entry in listing.get("output") or []
-        if entry.get("type") == "-" and parse_tracker_file_name(entry.get("name", ""))
-    ]
+    try:
+        return parse_listing(firecrest(config, access_token, "GET", "ls", config.tracker_dir))
+    except RuntimeError as error:
+        fail(f"Listing the tracker directory failed: {error}")
+    except ValueError:
+        fail("Listing the tracker directory returned an unexpected response")
 
 
 def load_records(runs_dir: Path) -> dict[str, Json]:
@@ -535,7 +569,7 @@ def collect(runs_dir: Path, manifest: Path) -> None:
                 config, access_token, "GET", "download", f"{config.tracker_dir}/{file.name}"
             )
             contents[file.name] = content.decode("utf-8")
-        except (RuntimeError, OSError, UnicodeDecodeError):
+        except (RuntimeError, UnicodeDecodeError):
             pass  # Counted as skipped by plan_collection
 
     existing = load_records(runs_dir)
@@ -568,7 +602,10 @@ def collect(runs_dir: Path, manifest: Path) -> None:
 
 
 def delete_processed(manifest_path: Path, dry_run: bool) -> None:
-    manifest = json.loads(manifest_path.read_text())
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        fail("The manifest of collected files can't be read")
     config = get_config()
     if manifest.get("system") != config.system or manifest.get("trackerDir") != config.tracker_dir:
         fail("The manifest was written for another system or tracker directory")
@@ -582,7 +619,7 @@ def delete_processed(manifest_path: Path, dry_run: bool) -> None:
     for name in names:
         try:
             firecrest(config, access_token, "DELETE", "rm", f"{config.tracker_dir}/{name}")
-        except (RuntimeError, OSError):
+        except RuntimeError:
             # Collecting again is idempotent, so the file is simply processed again next time
             failures += 1
     print(f"Deleted {len(names) - failures} of {len(names)} tracker files")

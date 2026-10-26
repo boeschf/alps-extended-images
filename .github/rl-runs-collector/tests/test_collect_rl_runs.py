@@ -283,3 +283,93 @@ def test_run_ids_are_keyed_and_per_cluster():
     assert get_id("clariden", "501") == run_id
     assert get_id("daint", "501") != run_id
     assert crr.make_run_id_function("j" * 32)("clariden", "501") != run_id
+
+
+def test_runs_without_a_known_time_limit_eventually_become_unknown():
+    record = {"startedOn": "2026-10-01", "run": {"timeLimit": None}, "result": None}
+    assert crr.get_run_status(record, NOW) == "unknown"
+    assert crr.get_run_status({**record, "startedOn": "2026-10-22"}, NOW) == "running"
+
+
+class TestFirecrestErrors:
+    CONFIG = crr.Config(
+        firecrest_url="https://firecrest.invalid",
+        token_url="https://auth.invalid/token",
+        client_id="client",
+        client_secret="not-a-real-secret",
+        system="clariden",
+        tracker_dir="/tracker",
+        run_id_key="k" * 32,
+    )
+
+    @staticmethod
+    def respond_with(monkeypatch, outcome):
+        class Response:
+            def __init__(self, body):
+                self.body = body
+
+            def read(self):
+                return self.body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(request, timeout):
+            if isinstance(outcome, Exception):
+                raise outcome
+            return Response(outcome)
+
+        monkeypatch.setattr(crr.urllib.request, "urlopen", urlopen)
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            crr.urllib.error.URLError("no route"),
+            TimeoutError(),
+            b"<html>gateway error</html>",
+            b"[]",
+            b'{"token_type": "bearer"}',
+        ],
+    )
+    def test_token_failures_end_the_pass_with_a_short_message(self, monkeypatch, capsys, outcome):
+        self.respond_with(monkeypatch, outcome)
+        with pytest.raises(SystemExit):
+            crr.get_access_token(self.CONFIG)
+        error = capsys.readouterr().err
+        assert error.startswith("::error::Token")
+        assert "not-a-real-secret" not in error and "Traceback" not in error
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [crr.urllib.error.URLError("no route"), b'{"errorType": "error", "message": "x"}', b"oops"],
+    )
+    def test_listing_failures_end_the_pass_with_a_short_message(self, monkeypatch, capsys, outcome):
+        self.respond_with(monkeypatch, outcome)
+        with pytest.raises(SystemExit):
+            crr.list_tracker_files(self.CONFIG, "token")
+        assert capsys.readouterr().err.startswith("::error::Listing the tracker directory")
+
+    def test_listing_keeps_only_well_formed_tracker_file_entries(self):
+        listing = {
+            "output": [
+                {"name": "1-run.json", "type": "-", "size": "120", "lastModified": RECENT},
+                {"name": "2-run.json", "type": "-", "size": 99},
+                {"name": "3-run.json", "type": "d"},
+                {"name": "notes.txt", "type": "-"},
+                {"type": "-"},
+                "garbage",
+            ]
+        }
+        files = crr.parse_listing(json.dumps(listing).encode())
+        assert [(f.name, f.size, f.last_modified) for f in files] == [
+            ("1-run.json", 120, RECENT),
+            ("2-run.json", 99, None),
+        ]
+
+    def test_download_failures_are_retried_rather_than_crashing(self, monkeypatch):
+        self.respond_with(monkeypatch, TimeoutError())
+        with pytest.raises(RuntimeError, match="GET ops/download failed: TimeoutError"):
+            crr.firecrest(self.CONFIG, "token", "GET", "download", "/tracker/1-run.json")

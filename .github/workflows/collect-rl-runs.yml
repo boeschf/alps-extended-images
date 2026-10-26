@@ -75,6 +75,9 @@ jobs:
       - name: Collect tracker files
         run: python .github/rl-runs-collector/collect_rl_runs.py collect --runs-dir runs --manifest "$MANIFEST"
 
+      # No pull or force: only this workflow writes to rl-runs, one pass at a time, from a fresh
+      # checkout. If the push is ever rejected, the step fails, nothing is deleted, and the next
+      # pass collects the same files again on top of the current branch.
       - name: Commit and push the records
         working-directory: runs
         run: |
