@@ -83,6 +83,14 @@ RCCL rebuilds are opt-in with `ROCM_REBUILD_RCCL=1`.
 The ROCm 10.0 base ships only runtime SDK wheels (there is no public `rocm-sdk-devel` for ROCm 10), so its profile pins the matching `rocm-libraries` source tag (`ROCM_LIBRARIES_REPO`/`ROCM_LIBRARIES_COMMIT`) and the build generates the missing devel payload from it: CMake package configs for every package torch's `LoadHIP` requires, the public math-library headers, and dev-name library symlinks, mirrored at both `/opt/rocm` and the wheel install prefix.
 ROCm 7.x profiles use the real `rocm-sdk-devel` wheel instead and need no such pin.
 
+ROCm build-prefix discovery prefers the complete devel/compatibility view, even when the runtime wheels expose development symlinks.
+Runtime `ldconfig` discovery remains wheel-first so Torch and other consumers do not load duplicate LLVM libraries.
+
+The ROCm 10 compatibility payload includes MIOpen's public C API headers, generated version/export headers and HIP backend configuration in both SDK include layouts.
+It retains the wheel's MIOpen runtime rather than installing a second copy.
+The build checks the pinned header version against `miopenGetVersion`; base environment validation compiles and links a consumer, creates a GPU handle, and compares an explicit MIOpen convolution with a CPU reference.
+MIOpen's private C++ implementation headers are not installed.
+
 RCCL builds and `rccl-tests` share SDK compiler discovery: prefer `${ROCM_SDK_BIN}/amdclang++`, falling back to `${ROCM_CORE_PREFIX}/lib/llvm/bin/clang++` for wheel-only layouts.
 The test build passes that compiler explicitly to CMake instead of relying on the upstream toolchain's conventional `ROCM_PATH/llvm/bin/amdclang++` path.
 
@@ -147,7 +155,7 @@ Tested-marker tags have the form `<canonical-tag>-tested-<validation-hash>` and 
 - OCI timestamps and commit metadata are applied after software installation in every base and app image.
   A final no-op `RUN` makes metadata changes visible to Podman's label cache without rerunning expensive builds.
   The generator image has only static labels.
-- App profile hashes use only the selected accelerator's settings; see [App profile hash coverage](#app-profile-hash-coverage) for supported keys and source-file defaults.
+- App profile hashes use only the selected build target's settings; see [App profile hash coverage](#app-profile-hash-coverage) for supported keys and source-file defaults.
 - The repository-root `.dockerignore` excludes Git metadata, Python caches, and editor scratch files without restricting source directories.
   These transient files are also excluded from recursive content hashing.
 - Base patch changes can invalidate both accelerator families' canonical refs.
@@ -158,23 +166,25 @@ Tested-marker tags have the form `<canonical-tag>-tested-<validation-hash>` and 
 ### App profile hash coverage
 
 `app_refs` reads the following app `profile.env` keys instead of hashing the complete profile file.
-`<VARIANT>` is the selected accelerator in uppercase, such as `CUDA` or `ROCM`.
+`APP_VARIANTS` contains flat build targets: legacy `cuda` / `rocm`, or arbitrary family-qualified names ending in `-cuda` / `-rocm`.
+`<TARGET>` is the selected target uppercased with `-` replaced by `_`; for example, hypothetical `example-stage-cuda` settings use the `EXAMPLE_STAGE_CUDA` prefix.
+The selected base determines the accelerator family, and contradictory suffixes or colliding normalized prefixes are rejected.
 
 | Profile keys | Content-hash coverage |
 | --- | --- |
-| `<VARIANT>_BASE_IMAGE` | Resolved canonical base ref; the raw selector is not hashed separately. |
-| `COMMON_CONTAINERFILE`, `<VARIANT>_CONTAINERFILE` | Effective selected path and file contents; variant override, then common value, then `Containerfile`. |
-| `COMMON_TEST_DIR`, `<VARIANT>_TEST_DIR` | Both declared paths and their recursive contents. |
-| `COMMON_PATCH_DIR`, `<VARIANT>_PATCH_DIR` | Both declared paths and their recursive contents. |
-| `COMMON_SOURCE_FILES`, `<VARIANT>_SOURCE_FILES` | Both selected lists and file contents; if both lists are empty, an existing `sources/` directory is hashed recursively. |
-| `APP_VARIANTS` | Validates variant eligibility; the full list is not hashed, but the selected variant is. |
+| `<TARGET>_BASE_IMAGE` | Resolved canonical base ref; the raw selector is not hashed separately. |
+| `COMMON_CONTAINERFILE`, `<TARGET>_CONTAINERFILE` | Effective selected path and file contents; target override, then common value, then `Containerfile`. |
+| `COMMON_TEST_DIR`, `<TARGET>_TEST_DIR` | Both declared paths and their recursive contents. |
+| `COMMON_PATCH_DIR`, `<TARGET>_PATCH_DIR` | Both declared paths and their recursive contents. |
+| `COMMON_SOURCE_FILES`, `<TARGET>_SOURCE_FILES` | Both selected lists and file contents; if both lists are empty, an existing `sources/` directory is hashed recursively. |
+| `APP_VARIANTS` | Validates target eligibility and base-family agreement; the full list is not hashed, but the selected target is. |
 
-Source lists are whitespace-separated, app-relative files and must cover every source file copied for that variant.
-Other logical hash inputs are the app name, selected variant, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`.
+Source lists are whitespace-separated, app-relative files and must cover every source file copied for that target.
+Other logical hash inputs are the app name, selected target, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`.
 Containerfile, patch, test, source, copied package-helper, and `.dockerignore` contents are hashed as described above.
 
-When adding a build-affecting profile key, update its reader, hash inputs, this contract, and accelerator-invalidation regression coverage together.
-Unselected accelerator settings must not invalidate the selected image.
+When adding a build-affecting profile key, update its reader, hash inputs, this contract, and target-invalidation regression coverage together.
+Unselected target settings must not invalidate the selected image.
 
 ## Manual Builds
 
