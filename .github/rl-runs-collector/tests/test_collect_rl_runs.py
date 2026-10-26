@@ -419,20 +419,18 @@ class TestLoadRecords:
 
 
 class TestDeletePhase:
-    ENV = {
-        "FIRECREST_URL": "https://firecrest.invalid",
-        "FIRECREST_TOKEN_URL": "https://auth.invalid/token",
-        "FIRECREST_CLIENT_ID": "client",
-        "FIRECREST_CLIENT_SECRET": "not-a-real-secret",
-        "FIRECREST_SYSTEM": "clariden",
-        "RUN_TRACKER_DIR": "/tracker",
-        "RUN_ID_KEY": "k" * 32,
-    }
+    CONFIG = crr.Config(
+        firecrest_url="https://firecrest.invalid",
+        token_url="https://auth.invalid/token",
+        client_id="client",
+        client_secret="not-a-real-secret",
+        system="clariden",
+        tracker_dir="/tracker",
+        run_id_key="k" * 32,
+    )
 
     @pytest.fixture()
     def calls(self, monkeypatch):
-        for name, value in self.ENV.items():
-            monkeypatch.setenv(name, value)
         calls = []
         monkeypatch.setattr(crr, "get_access_token", lambda config: "token")
 
@@ -454,7 +452,7 @@ class TestDeletePhase:
 
     def test_deletes_only_the_listed_tracker_files(self, tmp_path, calls, capsys):
         names = ["7-run.json", "../7-run.json", "notes.txt", 42, "7-result.json"]
-        crr.delete_processed(self.manifest(tmp_path, delete=names), dry_run=False)
+        crr.delete_processed(self.CONFIG, self.manifest(tmp_path, delete=names), dry_run=False)
         assert calls == [
             ("DELETE", "rm", "/tracker/7-run.json"),
             ("DELETE", "rm", "/tracker/7-result.json"),
@@ -462,7 +460,7 @@ class TestDeletePhase:
         assert "Deleted 2 of 2 tracker files" in capsys.readouterr().out
 
     def test_dry_run_deletes_nothing(self, tmp_path, calls, capsys):
-        crr.delete_processed(self.manifest(tmp_path), dry_run=True)
+        crr.delete_processed(self.CONFIG, self.manifest(tmp_path), dry_run=True)
         assert calls == []
         assert "Would delete 2 tracker files" in capsys.readouterr().out
 
@@ -472,12 +470,55 @@ class TestDeletePhase:
     )
     def test_refuses_a_manifest_for_another_system_or_directory(self, tmp_path, calls, overrides):
         with pytest.raises(SystemExit):
-            crr.delete_processed(self.manifest(tmp_path, **overrides), dry_run=False)
+            crr.delete_processed(self.CONFIG, self.manifest(tmp_path, **overrides), dry_run=False)
         assert calls == []
 
     def test_fails_the_step_when_files_could_not_be_deleted(self, tmp_path, calls, capsys):
         with pytest.raises(SystemExit) as exit_info:
-            crr.delete_processed(self.manifest(tmp_path, delete=["9-run.json", "7-run.json"]), dry_run=False)
+            crr.delete_processed(self.CONFIG, self.manifest(tmp_path, delete=["9-run.json", "7-run.json"]), dry_run=False)
         assert exit_info.value.code == 1
         assert len(calls) == 2
         assert "1 tracker files could not be deleted" in capsys.readouterr().err
+
+
+class TestCollectPhase:
+    CONFIG = TestDeletePhase.CONFIG
+
+    @pytest.fixture()
+    def tracker(self, monkeypatch):
+        """Tracker files by name: bytes, or an exception their download raises."""
+        files = {}
+        monkeypatch.setattr(crr, "get_access_token", lambda config: "token")
+        monkeypatch.setattr(
+            crr,
+            "list_tracker_files",
+            lambda config, token: [crr.TrackerFile(name, None, OLD) for name in files],
+        )
+
+        def firecrest(config, access_token, method, operation, path):
+            content = files[path.rsplit("/", 1)[1]]
+            if isinstance(content, Exception):
+                raise content
+            return content
+
+        monkeypatch.setattr(crr, "firecrest", firecrest)
+        return files
+
+    def test_retries_files_that_could_not_be_downloaded_and_says_so(self, tmp_path, tracker, capsys):
+        tracker["7-run.json"] = json.dumps(run_file("7")).encode()
+        tracker["8-run.json"] = RuntimeError("GET ops/download failed: TimeoutError")
+        crr.collect(self.CONFIG, tmp_path, tmp_path / "manifest.json")
+        manifest = json.loads((tmp_path / "manifest.json").read_text())
+        # Even though it is old, the file that couldn't be read is kept for the next pass
+        assert manifest["delete"] == ["7-run.json"]
+        output = capsys.readouterr().out
+        assert "1 skipped" in output
+        assert "::warning::1 tracker files could not be downloaded" in output
+
+    def test_expires_old_files_that_are_not_utf8_instead_of_retrying_them_forever(
+        self, tmp_path, tracker
+    ):
+        tracker["9-run.json"] = b"\xff\xfe{garbage"
+        crr.collect(self.CONFIG, tmp_path, tmp_path / "manifest.json")
+        manifest = json.loads((tmp_path / "manifest.json").read_text())
+        assert manifest["delete"] == ["9-run.json"]

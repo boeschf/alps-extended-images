@@ -441,6 +441,10 @@ class Config:
 
 
 def get_config() -> Config:
+    """Reads the configuration from the environment, where the workflow passes its secrets.
+
+    Only main() calls it; everything else is given the configuration explicitly.
+    """
     names = [
         "FIRECREST_URL",
         "FIRECREST_TOKEN_URL",
@@ -592,19 +596,25 @@ def log_reasons(title: str, files: list[tuple[str, str]]) -> None:
         print(f"    {count} × {reason}")
 
 
-def collect(runs_dir: Path, manifest: Path) -> None:
-    config = get_config()
+def collect(config: Config, runs_dir: Path, manifest: Path) -> None:
     access_token = get_access_token(config)
     files = list_tracker_files(config, access_token)
     contents = {}
+    read_failures = 0
     for file in files:
         try:
             content = firecrest(
                 config, access_token, "GET", "download", f"{config.tracker_dir}/{file.name}"
             )
-            contents[file.name] = content.decode("utf-8")
-        except (RuntimeError, UnicodeDecodeError):
-            pass  # Counted as skipped by plan_collection
+        except RuntimeError:
+            # A failed download says nothing about the file, so it isn't expired or deleted:
+            # plan_collection skips it and the next pass tries again
+            read_failures += 1
+            continue
+        # Bytes that aren't UTF-8 can't be a valid tracker file. Replacing them, rather than
+        # treating the file as unreadable, lets validation reject it so that it expires instead
+        # of being retried forever; replaced characters never pass the field checks.
+        contents[file.name] = content.decode("utf-8", errors="replace")
 
     existing = load_records(runs_dir)
     now = datetime.now(timezone.utc)
@@ -633,16 +643,17 @@ def collect(runs_dir: Path, manifest: Path) -> None:
         print(f"  updated {record_path}")
     log_reasons("expired", plan.expired)
     log_reasons("skipped", plan.skipped)
+    if read_failures:
+        print(f"::warning::{read_failures} tracker files could not be downloaded; the next pass retries them")
 
 
-def delete_processed(manifest_path: Path, dry_run: bool) -> None:
+def delete_processed(config: Config, manifest_path: Path, dry_run: bool) -> None:
     try:
         manifest = json.loads(manifest_path.read_text())
     except (OSError, ValueError):
         fail("The manifest of collected files can't be read")
     if not isinstance(manifest, dict) or not isinstance(manifest.get("delete"), list):
         fail("The manifest of collected files is malformed")
-    config = get_config()
     if manifest.get("system") != config.system or manifest.get("trackerDir") != config.tracker_dir:
         fail("The manifest was written for another system or tracker directory")
     # Only tracker file names, directly in the tracker directory
@@ -678,10 +689,11 @@ def main() -> None:
     delete_parser.add_argument("--manifest", type=Path, required=True)
     delete_parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    config = get_config()
     if args.command == "collect":
-        collect(args.runs_dir, args.manifest)
+        collect(config, args.runs_dir, args.manifest)
     else:
-        delete_processed(args.manifest, args.dry_run)
+        delete_processed(config, args.manifest, args.dry_run)
 
 
 if __name__ == "__main__":
