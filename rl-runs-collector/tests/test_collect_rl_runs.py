@@ -1,0 +1,285 @@
+import importlib.util
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+
+COLLECTOR = Path(__file__).resolve().parents[1] / "collect_rl_runs.py"
+spec = importlib.util.spec_from_file_location("collect_rl_runs", COLLECTOR)
+crr = importlib.util.module_from_spec(spec)
+# Registered before running it, as dataclasses look their module up
+sys.modules[spec.name] = crr
+spec.loader.exec_module(crr)
+
+NOW = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+RECENT = "2026-10-23T11:00:00Z"
+OLD = "2026-10-20T11:00:00Z"
+RECIPE = "nemo-rl-apertus-gsm8k"
+
+
+def get_run_id(cluster, job_id):
+    """Stand-in for the keyed hash: 16 hex characters per cluster and job."""
+    return f"{'c' if cluster == 'clariden' else 'd'}{job_id.zfill(15)}"[:16]
+
+
+def run_file(job_id, **overrides):
+    data = {
+        "schemaVersion": crr.RUN_RECORD_SCHEMA_VERSION,
+        "jobId": job_id,
+        "cluster": "clariden",
+        "startedAt": "2026-10-23T08:13:27Z",
+        "launch": {
+            "recipe": {"id": RECIPE, "version": "0f34d2a5d94a6be6c679e69270433dd3af51c80d"},
+            "model": {"id": "apertus-2-chonk"},
+            "environment": {"id": "gsm8k"},
+            "preset": {"id": "muon"},
+            "hyperparameters": {"MAX_NUM_STEPS": 58, "BASE_LR": 2e-7, "USE_FOO": True},
+            "monitoring": {"destination": "wandb"},
+            "job": {"nodes": 20, "gpusPerNode": 4, "timeLimit": "07:00:00"},
+        },
+    }
+    data.update(overrides)
+    return data
+
+
+def result_file(job_id, **overrides):
+    data = {
+        "schemaVersion": crr.RUN_RECORD_SCHEMA_VERSION,
+        "jobId": job_id,
+        "cluster": "clariden",
+        "recipeId": RECIPE,
+        "status": "completed",
+        "exitCode": 0,
+        "signal": "",
+        "startedAt": "2026-10-23T08:13:27Z",
+        "endedAt": "2026-10-23T09:33:41Z",
+        "elapsedSeconds": 4814,
+        "metrics": None,
+    }
+    data.update(overrides)
+    return data
+
+
+def collect(files, contents, existing=None):
+    return crr.plan_collection(
+        [crr.TrackerFile(name=name, size=size, last_modified=modified) for name, modified, size in files],
+        {name: json.dumps(data) if not isinstance(data, str) else data for name, data in contents.items()},
+        existing or {},
+        get_run_id,
+        NOW,
+    )
+
+
+def collect_one(name, data):
+    return collect([(name, RECENT, None)], {name: data})
+
+
+class TestTrackerFiles:
+    def test_only_accepts_job_id_run_and_result_names(self):
+        assert crr.parse_tracker_file_name("123-run.json") == ("123", "run")
+        assert crr.parse_tracker_file_name("123-result.json") == ("123", "result")
+        assert crr.parse_tracker_file_name(".123-run.json.tmp") is None
+        assert crr.parse_tracker_file_name("../123-run.json") is None
+        assert crr.parse_tracker_file_name("abc-run.json") is None
+        # Python's $ would accept a trailing newline, and \d other scripts' digits
+        assert crr.parse_tracker_file_name("123-run.json\n") is None
+        assert crr.parse_tracker_file_name("١٢٣-run.json") is None
+
+    def test_rejects_files_that_could_not_be_placed_safely(self):
+        def parse(name, data):
+            return crr.parse_tracker_file(name, json.dumps(data))
+
+        assert parse("1-run.json", run_file("1")).kind == "run"
+        bad_recipe = run_file("1", launch={"recipe": {"id": "../../x"}})
+        assert isinstance(parse("1-run.json", bad_recipe), str)
+        assert isinstance(parse("1-result.json", result_file("1", cluster="a/b")), str)
+        assert isinstance(parse("1-result.json", result_file("1", cluster="clariden\n")), str)
+        assert isinstance(parse("1-result.json", result_file("1", status="pwned")), str)
+        assert isinstance(parse("1-run.json", run_file("1", schemaVersion=True)), str)
+        assert parse("1-run.json", run_file("2")) == "jobId does not match the file name"
+        assert crr.parse_tracker_file("1-run.json", '{"truncated":') == "not valid JSON"
+
+
+class TestPublishedRecords:
+    def test_keep_only_allowlisted_fields_whatever_else_a_file_contains(self):
+        launch = run_file("7")["launch"]
+        plan = collect_one(
+            "7-run.json",
+            run_file(
+                "7",
+                user="alice",
+                account="a01",
+                workingDirectory="/users/alice/runs",
+                launch={
+                    **launch,
+                    "recipe": {"id": RECIPE, "version": None, "name": "Alice's run"},
+                    "model": {"id": "apertus-2-chonk", "modelPath": "/users/alice/model"},
+                    "hyperparameters": {
+                        "MAX_NUM_STEPS": 58,
+                        "DATA_PATH": "/users/alice/data",
+                        "NOTE": "contact alice@example.com",
+                        "MODE": "fast",
+                        "bad key": 1,
+                        "NAN": None,
+                        "TRAILING": "fast\n",
+                    },
+                    "monitoring": {"destination": "wandb", "environment": {"WANDB_ENTITY": "alice"}},
+                    "job": {"name": "alice-test", "nodes": 20, "gpusPerNode": 4, "timeLimit": "07:00:00"},
+                },
+            ),
+        )
+        record = plan.records[f"{RECIPE}/c000000000000007.json"]
+        assert record == {
+            "schemaVersion": crr.RUN_RECORD_SCHEMA_VERSION,
+            "runId": "c000000000000007",
+            "recipeId": RECIPE,
+            "cluster": "clariden",
+            "startedOn": "2026-10-23",
+            "run": {
+                "recipe": {"id": RECIPE, "version": None},
+                "model": "apertus-2-chonk",
+                "environment": "gsm8k",
+                "preset": "muon",
+                "hyperparameters": {"MAX_NUM_STEPS": 58, "MODE": "fast"},
+                "monitoring": "wandb",
+                "nodes": 20,
+                "gpusPerNode": 4,
+                "timeLimit": "07:00:00",
+            },
+            "result": None,
+        }
+        published = json.dumps(plan.records)
+        for leaked in ("alice", '"7"', "08:13"):
+            assert leaked not in published
+
+    def test_keep_results_to_status_exit_day_duration_and_numeric_metrics(self):
+        plan = collect_one(
+            "7-result.json",
+            result_file(
+                "7",
+                signal="TERM",
+                status="terminated",
+                exitCode=143,
+                metrics={"val:accuracy": 0.907, "note": "great run by alice", "steps": 58, "flag": True},
+                user="alice",
+            ),
+        )
+        assert plan.records[f"{RECIPE}/c000000000000007.json"]["result"] == {
+            "status": "terminated",
+            "exitCode": 143,
+            "signal": "TERM",
+            "endedOn": "2026-10-23",
+            "elapsedSeconds": 4814,
+            "metrics": {"val:accuracy": 0.907, "steps": 58},
+        }
+
+    def test_booleans_are_not_numbers(self):
+        plan = collect_one("7-result.json", result_file("7", exitCode=True, elapsedSeconds=False))
+        result = plan.records[f"{RECIPE}/c000000000000007.json"]["result"]
+        assert result["exitCode"] is None
+        assert result["elapsedSeconds"] is None
+
+
+class TestPlanCollection:
+    def test_merges_a_run_and_its_result_and_marks_both_for_deletion(self):
+        plan = collect(
+            [("7-result.json", RECENT, None), ("7-run.json", RECENT, None)],
+            {"7-run.json": run_file("7"), "7-result.json": result_file("7")},
+        )
+        record = plan.records[f"{RECIPE}/c000000000000007.json"]
+        assert record["run"]["preset"] == "muon"
+        assert record["result"]["status"] == "completed"
+        assert sorted(plan.processed) == ["7-result.json", "7-run.json"]
+
+    def test_adds_a_later_result_to_the_existing_record(self):
+        first = collect_one("7-run.json", run_file("7"))
+        plan = collect(
+            [("7-result.json", RECENT, None)],
+            {"7-result.json": result_file("7", status="failed", exitCode=1)},
+            first.records,
+        )
+        record = plan.records[f"{RECIPE}/c000000000000007.json"]
+        assert record["run"]["preset"] == "muon"
+        assert record["result"]["status"] == "failed"
+
+    def test_keeps_the_same_job_id_on_another_cluster_apart(self):
+        plan = collect(
+            [("7-run.json", RECENT, None), ("7-result.json", RECENT, None)],
+            {"7-run.json": run_file("7"), "7-result.json": result_file("7", cluster="daint")},
+        )
+        assert sorted(plan.records) == [
+            f"{RECIPE}/c000000000000007.json",
+            f"{RECIPE}/d000000000000007.json",
+        ]
+
+    def test_keeps_recent_invalid_or_unreadable_files_and_expires_old_invalid_ones(self):
+        plan = collect(
+            [
+                ("1-run.json", RECENT, None),
+                ("2-run.json", OLD, None),
+                ("3-run.json", OLD, None),
+                ("4-run.json", OLD, 10 * 1024 * 1024),
+                ("notes.txt", OLD, None),
+            ],
+            {"1-run.json": "garbage", "2-run.json": "garbage", "4-run.json": run_file("4")},
+        )
+        assert plan.records == {}
+        assert plan.processed == []
+        assert [name for name, _ in plan.expired] == ["2-run.json", "4-run.json"]
+        # 3 could not be read: retried, never expired; other files are ignored
+        assert [name for name, _ in plan.skipped] == ["1-run.json", "3-run.json"]
+
+    def test_rejects_a_run_id_function_that_does_not_return_16_hex_characters(self):
+        with pytest.raises(ValueError):
+            crr.plan_collection(
+                [crr.TrackerFile("7-run.json", last_modified=RECENT)],
+                {"7-run.json": json.dumps(run_file("7"))},
+                {},
+                lambda cluster, job_id: job_id,
+                NOW,
+            )
+
+
+class TestRunIndex:
+    @staticmethod
+    def record(job_id, started_at, with_result):
+        files = [(f"{job_id}-run.json", RECENT, None)]
+        contents = {f"{job_id}-run.json": run_file(job_id, startedAt=started_at)}
+        if with_result:
+            files.append((f"{job_id}-result.json", RECENT, None))
+            contents[f"{job_id}-result.json"] = result_file(job_id)
+        return next(iter(collect(files, contents).records.values()))
+
+    def test_reports_runs_without_result_as_running_then_unknown_after_their_time_limit(self):
+        assert crr.parse_time_limit("1-02:00:00").total_seconds() == 26 * 3600
+        assert crr.get_run_status(self.record("1", "2026-10-23T08:00:00Z", False), NOW) == "running"
+        assert crr.get_run_status(self.record("1", "2026-10-19T08:00:00Z", False), NOW) == "unknown"
+        assert crr.get_run_status(self.record("1", "2026-10-19T08:00:00Z", True), NOW) == "completed"
+
+    def test_lists_the_runs_of_one_recipe_newest_first_without_its_own_timestamp(self):
+        records = [
+            self.record("1", "2026-10-22T08:00:00Z", True),
+            self.record("2", "2026-10-23T08:00:00Z", False),
+            {**self.record("3", "2026-10-23T09:00:00Z", False), "recipeId": "verl-grpo"},
+        ]
+        index = crr.build_run_index(RECIPE, records, NOW)
+        assert [run["runId"] for run in index["runs"]] == ["c000000000000002", "c000000000000001"]
+        assert index["runs"][1]["path"] == f"{RECIPE}/c000000000000001.json"
+        assert index["runs"][1]["status"] == "completed"
+        assert index["runs"][1]["preset"] == "muon"
+        assert index["runs"][1]["hyperparameters"]["MAX_NUM_STEPS"] == 58
+        assert index["runs"][1]["elapsedSeconds"] == 4814
+        # Rebuilding with nothing new gives the same content, so there is nothing to commit
+        assert crr.build_run_index(RECIPE, records, NOW) == index
+
+
+def test_run_ids_are_keyed_and_per_cluster():
+    get_id = crr.make_run_id_function("k" * 32)
+    run_id = get_id("clariden", "501")
+    assert crr.RUN_ID_PATTERN.match(run_id)
+    assert get_id("clariden", "501") == run_id
+    assert get_id("daint", "501") != run_id
+    assert crr.make_run_id_function("j" * 32)("clariden", "501") != run_id

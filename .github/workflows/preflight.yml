@@ -51,6 +51,9 @@ jobs:
           # use a fake skopeo executable, so no credentials or CSCS runners are needed.
           python -m py_compile ci-pipelines/helpers/generate-child-pipeline.py
           uvx --with pyyaml pytest ci-pipelines/tests
+          # The RL run collector is standard library only
+          python -m py_compile rl-runs-collector/collect_rl_runs.py
+          uvx pytest rl-runs-collector/tests
 
       - name: Shell syntax
         # Catch syntax errors in tracked shell scripts, including sourced helpers.
