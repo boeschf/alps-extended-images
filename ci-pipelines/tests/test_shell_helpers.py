@@ -723,6 +723,22 @@ def test_rocm_sdk_refuses_mismatched_preinstalled_wheels(tmp_path, mismatch):
     assert f"Incompatible {mismatch}: installed 7.13.0, expected ROCm 7.14.0" in result.stderr
 
 
+def test_new_build_dependency_cleanup_preserves_inherited_multiarch_packages(tmp_path):
+    snapshot = tmp_path / "packages-before.txt"
+    snapshot.write_text("libnuma-dev:amd64\ncmake\n")
+
+    result = run_bash(
+        """
+source Alps-Images/common/package-helpers.sh
+cleanup_apt_build_deps() { printf '%s\\n' "$@"; }
+cleanup_new_apt_build_deps "$SNAPSHOT_FILE" libnuma-dev cmake ninja-build
+""",
+        env={"SNAPSHOT_FILE": str(snapshot)},
+    )
+
+    assert result.stdout.splitlines() == ["ninja-build"]
+
+
 def test_exact_build_package_purge_refuses_reverse_dependency_removal(tmp_path):
     import shutil
 
