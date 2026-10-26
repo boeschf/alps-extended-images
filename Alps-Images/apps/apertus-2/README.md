@@ -1,21 +1,22 @@
 # Apertus2 Megatron-LM
 
-Two independent CUDA targets provide Apertus2 Megatron software for Alps.
-Both targets expect an external Megatron-LM checkout.
+Three independent targets provide Apertus2 Megatron software for Alps.
+The CUDA targets expect an external Megatron-LM checkout; the native ROCm target includes a pinned Swiss AI checkout.
 Data and checkpoints remain external.
 
 | Target | Containerfile | Base | Purpose |
 | --- | --- | --- | --- |
 | `megatron-base-cuda` | `Containerfile.megatron-base` | `pytorch-cuda:25.12-py3` | Minimal Chonk and Megachonk training stack |
 | `megatron-cuda` | `Containerfile.megatron` | `pytorch-cuda:26.06-py3` | Full training, test, server and inference stack |
+| `megatron-rocm` | `Containerfile.megatron.rocm` | `pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13` | Native MI300 training with ROCm TE, UCCL EP, KDA and Muon |
 
 Target names select separate images, not image inheritance.
-The selected base determines the accelerator family and build/test runner; both CUDA targets use GH200.
+The selected base determines the accelerator family and build/test runner; the two CUDA targets use GH200, while `megatron-rocm` uses Beverin MI300.
 Each target must end in its base-derived family; a mismatch is rejected.
 `APP_VARIANTS` lists these flat targets, with no separate logical-variant property.
 Profile keys uppercase target names and replace hyphens with underscores; colliding normalized names are rejected.
 
-Image names are `apertus-2-megatron-base-cuda` and `apertus-2-megatron-cuda`.
+Image names are `apertus-2-megatron-base-cuda`, `apertus-2-megatron-cuda`, and `apertus-2-megatron-rocm`.
 CI uses content-addressed tags.
 Stable dev tags use `alps7-dev`.
 
@@ -23,7 +24,7 @@ Stable dev tags use `alps7-dev`.
 
 App source hashes use explicit per-target file lists, so another target's installers do not invalidate the selected image.
 OCI metadata is applied after software installation, with Podman's final metadata-only `RUN` boundary.
-The full CUDA target copies install helpers and lock files where first needed.
+The full CUDA target copies install helpers and lock files where first needed; the ROCm target also copies each component's patches before its build.
 Changing an earlier dependency still rebuilds later layers.
 Compiler tools and headers required by runtime JIT remain installed.
 
@@ -223,9 +224,81 @@ The image preloads the CUDA 13 TorchMemorySaver library.
 Set `LD_PRELOAD=` to disable this hook when it is not needed.
 The TorchMemorySaver smoke test requires the default preload.
 
+## Native ROCm image: megatron-rocm
+
+This target is native ROCm training, **not feature parity with the CUDA Chonk production configuration**.
+It builds against the canonical Alps ROCm 10.0 / Torch 2.13 base on x86_64 and targets MI300 `gfx942`.
+Inherited Torch, TorchVision, TorchAudio, Triton and NumPy distributions are constrained during installation.
+Portable Python additions are resolved in `sources/rocm/requirements.lock` and installed without dependency resolution.
+`requirements.in` lists direct inputs; `requirements.overrides` excludes PyPI Torch/Triton and matches the inherited NumPy ABI during lock generation.
+Regenerate from the repository root with:
+
+```bash
+APP=Alps-Images/apps/apertus-2/sources/rocm
+uv pip compile "$APP/requirements.in" --overrides "$APP/requirements.overrides" \
+    --python-version 3.12 --python-platform x86_64-unknown-linux-gnu \
+    --no-emit-package torch --no-emit-package triton --no-emit-package numpy \
+    --no-annotate --no-header --output-file "$APP/requirements.lock"
+```
+
+
+Source pins live in [`sources/rocm/versions.env`](sources/rocm/versions.env).
+The stack includes:
+
+- ROCm Transformer Engine at `b56021a0e4a2e4a7822482ffdf5353368a777e0e`, with CK fused attention and runtime CK JIT; AOTriton is not compiled.
+  Hipified GPU `.cpp` and CK attention translation units are explicitly declared HIP; ordinary host-only C++ sources retain their language.
+  The build uses the base's canonical RCCL headers and resolves the packaged ROCTX ABI-4 runtime even when its unversioned development link is absent.
+  The app-local CK-JIT patch keeps AITER's interceptor discovery environment, but removes `ROCM_PATH`/`HIP_PATH` from real compiler/linker subprocesses at build time and during runtime CK JIT: those overrides break clang 23 device-math discovery with the wheel SDK.
+  The base SDK compatibility layout provides development links in the physical wheel library directories as well as `/opt/rocm`, so HIP compiler detection and shared-library linking work without overriding the compiler's SDK root.
+  MIOpen's public development headers come from the base, matching its bundled runtime; hipified ATen MIOpen includes need no app-local workaround.
+- UCCL EP and its real DeepEP wrapper at `18b588a048a3a3fe3d4bd60aa5678c66e284df31`.
+  This retains the D2H handle-table memory-pressure fix used by the full CUDA target.
+  App-local patches retain physical-GPU CXI selection, serialized barrier cleanup/provider initialization, ROCR GPU-memory registration, HIP launch and ROCm 10 compiler compatibility.
+  Proxies borrow the wrapper's RDMA allocation; its DLPack/Torch owner frees it.
+  Communication uses a PyTorch pool stream so recorded tensors remain safe to release after EP buffer destruction.
+  The older runtime-top-k patch is already upstream and is not applied twice.
+- The same Swiss AI FLA per-channel KDA gates and Emerging-Optimizers Muon `moonlight` scaling as the CUDA targets, plus a native causal-conv1d build.
+- Swiss AI Megatron-LM-MoE at `0789b8e429553c2f17c350afa8619c69d01bec25`, installed from `/opt/megatron-lm`, with its CPU dataset helper prebuilt.
+
+`/opt/alps/apertus2-rocm/` records base constraints, native source revisions and the installed package inventory.
+Compiler tools and headers remain installed for runtime JIT.
+UCCL handles expert communication; ordinary collectives retain the base image's Alps aws-ofi-rccl transport.
+No UCCL collective plugin is selected.
+
+**Excluded:** Swiss AI's CUDA/CUTLASS `nv_grouped_gemm` expert-offloading APIs, DeepGEMM FP8 expert offloading, Hopper FA3, FlashInfer, CuPy CUDA wheels, TorchMemorySaver's CUDA preload, and NVIDIA resiliency extensions.
+Native training should use TE experts rather than the custom offloading experts.
+Do not use CUDA expert-offloading configurations with this image; those paths are not supported.
+
+The ROCm target declares three image-local CI checks:
+
+1. `check-stack.py`: GPU-free metadata/ELF checks during build; on GPU, numerical TE Linear/GroupedLinear forward/backward, KDA gate and recurrent-kernel gradients, causal convolution, and stateful Muon updates.
+2. `train-smoke.sh`: single-GPU TE/CK BF16 GPT training with synthetic data, checkpoint at iteration 2, then a fresh process resuming through iteration 4.
+   It checks finite loss and optimizer/scheduler/RNG checkpoint state.
+3. `uccl-smoke.py`: two-node/eight-rank RCCL all-reduce and BF16 **high-throughput** UCCL dispatch/combine with numerical reference values.
+   It also destroys the EP buffer, releases recorded tensor storage, runs fresh GPU/RCCL work, and requires clean process exit.
+   It needs exclusive nodes, block rank order, and all four GPUs visible to each rank (`--gpu-bind=none`).
+   Same-user concurrent UCCL jobs cannot share nodes because the upstream POSIX-shm barriers are UID-scoped.
+
+Run inside the native image:
+
+```bash
+python3 /opt/tests/apertus-2/rocm/check-stack.py
+bash /opt/tests/apertus-2/rocm/train-smoke.sh
+```
+
+The distributed check runs directly under Slurm, not via Ray or torchrun.
+Its rendezvous address and port are derived from the Slurm allocation.
+CSCS EDF launches use `srun --environment` with the saved SquashFS as `image`, `/ritom/` mounted, `writable = true`, `entrypoint = true`, and `PMIX_MCA_psec = "native"`.
+Set `com.hooks.cxi.enabled = "false"` under `[annotations]` to retain the image's own CXI stack.
+
+Manual container launches must expose `/dev/kfd`, `/dev/dri` and the allocated `/dev/cxi*` devices, and forward the allocation's `SLINGSHOT_*`/`FI_CXI_*` environment.
+The base's RCCL transport requires CXI initialization even for the single-rank training smoke.
+
+These checks do not establish full-size hybrid-model convergence or scaling.
+
 ## Build
 
-From the repository root, select `megatron-base-cuda` or `megatron-cuda`:
+From the repository root, select `megatron-base-cuda`, `megatron-cuda`, or `megatron-rocm`:
 
 ```bash
 TARGET=megatron-cuda
@@ -239,7 +312,7 @@ manual-build/manual-build.sh \
 bash "$BUILD_DIR/build-$TARGET.sh"
 ```
 
-Build the CUDA targets on an aarch64 GH200 compute node.
+Build the CUDA targets on an aarch64 GH200 compute node; build `megatron-rocm` on an x86_64 node with the ROCm SDK supplied by its base image.
 Native extensions use explicit architecture targets, so builds need no visible GPU.
 The generated script selects the canonical, content-addressed base image, which must already exist locally or in the selected registry.
 Keep `IMAGE_PREFIX` and clone-URL inputs consistent when generating base and app scripts.
