@@ -140,7 +140,9 @@ Validation covers every declared target and base selector, so a malformed unsele
 | `COMMON_SOURCE_FILES`, `<TARGET>_SOURCE_FILES` | Both selected lists and file contents; if both lists are empty, an existing `sources/` directory is hashed recursively. |
 | `APP_VARIANTS` | Validates target eligibility and base-family agreement; the full list is not hashed, but the selected target is. |
 
-Source lists are whitespace-separated, app-relative files and must cover every source file copied for that target. Other logical hash inputs are the app name, selected target, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`. Containerfile, patch, test, source, copied package-helper, and `.dockerignore` contents are hashed as described above.
+Source lists are whitespace-separated, app-relative files and must cover every source file copied for that target.
+Other logical hash inputs are the app name, selected target, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`.
+Containerfile, patch, test, source, copied package-helper, and `.dockerignore` contents are hashed as described above.
 
 When adding a build-affecting profile key, update its reader, hash inputs, this contract, and target-invalidation regression coverage together.
 Valid unselected target settings do not invalidate the selected image's content hash.
