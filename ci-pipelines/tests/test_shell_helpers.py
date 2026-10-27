@@ -269,8 +269,9 @@ def test_meta_app_refs_use_canonical_base_ref(family, helper, canonical_index):
     name = image.removesuffix(f"-{family}")
     canonical = run_meta(f"{helper} {name} {variant}").stdout.split()[canonical_index]
     fields = run_meta(f"app_refs vllm {family}").stdout.split()
-    assert len(fields) == 4
+    assert len(fields) == 5
     assert fields[0] == canonical
+    assert fields[4] == family
 
 
 def test_meta_parse_base_image_rejects_unsupported_format():
@@ -498,12 +499,14 @@ def test_manual_build_generates_valid_cuda_app_script(tmp_path):
     script = generate_manual("app", "vllm", "cuda", output=tmp_path / "app-cuda.sh")
     assert "Alps-Images/apps/vllm/Containerfile" in script
     assert re.search(r'--build-arg BASE_IMAGE="localhost/alps-images/pytorch-cuda:.*-[0-9a-f]{32}"', script)
+    assert '-t "localhost/alps-images/vllm-cuda:alps7-dev" \\' in script
 
 
 def test_manual_build_generates_valid_rocm_app_script(tmp_path):
     script = generate_manual("app", "vllm", "rocm", output=tmp_path / "app-rocm.sh")
     assert "Alps-Images/apps/vllm/Containerfile.rocm" in script
     assert re.search(r'--build-arg BASE_IMAGE="localhost/alps-images/pytorch-rocm:.*-[0-9a-f]{32}"', script)
+    assert '-t "localhost/alps-images/vllm-rocm:alps7-dev" \\' in script
 
 
 @pytest.fixture()
@@ -570,6 +573,11 @@ def test_meta_named_targets_use_the_selected_base(named_app_root):
         run_meta(f"write_app_build_env {output} apertus-2 {target}", cwd=named_app_root)
         data = dict(line.split("=", 1) for line in output.read_text().splitlines())
         base_ref = run_meta(command, cwd=named_app_root).stdout.split()[ref_index]
+        fields = run_meta(f"app_refs apertus-2 {target}", cwd=named_app_root).stdout.split()
+        assert fields == [
+            base_ref, f"Alps-Images/apps/apertus-2/{recipe}",
+            data["CANON_IMAGE_REF"], data["STABLE_IMAGE_REF"], family,
+        ]
 
         assert data["FAMILY"] == family
         assert data["VARIANT"] == target
@@ -581,7 +589,7 @@ def test_meta_named_targets_use_the_selected_base(named_app_root):
 
 @pytest.mark.parametrize(
     "variants",
-    ["megatron-base-cuda megatron_base-cuda", "megatron-cuda MEGATRON-cuda", "megatron-cuda megatron-cuda"],
+    ["megatron-base-cuda megatron_base-cuda", "megatron-stage-cuda megatron_stage-cuda", "megatron-cuda megatron-cuda"],
 )
 @pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
 def test_meta_rejects_colliding_target_prefixes(named_app_root, variants, helper):
@@ -605,6 +613,19 @@ def test_meta_app_refs_reject_invalid_target_names(named_app_root, target):
 
     assert result.returncode != 0
     assert target in result.stderr
+
+
+@pytest.mark.parametrize("target", ["Megatron-cuda", "MEGATRON-cuda", "megatron-CUDA", "CUDA"])
+@pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
+def test_meta_consumers_reject_uppercase_target_names(named_app_root, target, helper):
+    write_named_target_profile(named_app_root, {target: "pytorch-cuda:26.06-py3"})
+
+    result = run_meta(f"{helper} apertus-2 {target}", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert target in result.stderr
+    assert "must match ^[a-z_][a-z0-9_-]*$" in result.stderr
 
 
 @pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
@@ -662,6 +683,29 @@ def test_meta_consumers_reject_mismatches_in_unselected_targets(named_app_root, 
     assert result.returncode != 0
     assert target in result.stderr
     assert base in result.stderr
+
+
+@pytest.mark.parametrize(
+    "target,base,error",
+    [
+        ("Megatron-rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13", "must match"),
+        ("megatron-rocm", "", "MEGATRON_ROCM_BASE_IMAGE must be set"),
+        ("megatron-rocm", "pytorch:plain", "expected BASE_IMAGE"),
+    ],
+)
+def test_meta_build_env_rejects_malformed_unselected_declarations(named_app_root, target, base, error):
+    write_named_target_profile(
+        named_app_root,
+        {"megatron-cuda": "pytorch-cuda:26.06-py3", target: base},
+    )
+    output = named_app_root / "build.env"
+
+    result = run_meta(f"write_app_build_env {output} apertus-2 megatron-cuda", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert error in result.stderr
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("failure", ["base-family-mismatch", "missing-validation-input"])

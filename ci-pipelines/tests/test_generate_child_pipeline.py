@@ -147,7 +147,7 @@ def test_app_variants_rejects_missing_or_empty_target_list(gen, tmp_path, profil
 
 @pytest.mark.parametrize(
     "variants",
-    ["megatron-base-cuda megatron_base-cuda", "megatron-cuda MEGATRON-cuda", "megatron-cuda megatron-cuda"],
+    ["megatron-base-cuda megatron_base-cuda", "megatron-stage-cuda megatron_stage-cuda", "megatron-cuda megatron-cuda"],
 )
 def test_app_variants_rejects_profile_prefix_collisions(gen, tmp_path, variants):
     profile = tmp_path / "profile.env"
@@ -169,6 +169,18 @@ def test_app_variants_rejects_invalid_target_name(gen, tmp_path, target):
         gen.app_variants_from_profile(profile)
 
     assert target in str(error.value)
+
+
+@pytest.mark.parametrize("target", ["Megatron-cuda", "MEGATRON-cuda", "megatron-CUDA", "CUDA"])
+def test_app_variants_rejects_uppercase_target_names(gen, tmp_path, target):
+    profile = tmp_path / "profile.env"
+    profile.write_text(f'APP_VARIANTS="{target}"\n')
+
+    with pytest.raises(RuntimeError) as error:
+        gen.app_variants_from_profile(profile)
+
+    assert target in str(error.value)
+    assert "must match ^[a-z_][a-z0-9_-]*$" in str(error.value)
 
 
 def test_app_variants_accepts_family_only_and_multi_part_targets(gen, tmp_path):
@@ -475,6 +487,17 @@ def test_schema_app_rejects_extra_cuda_vetnode_fields(gen):
         )
 
 
+@pytest.mark.parametrize("runner", ["cuda", "rocm"])
+def test_schema_app_rejects_cuda_vetnode_runner_override(gen, runner):
+    with pytest.raises(RuntimeError, match="app.yaml: cuda-vetnode app tests do not support: runner"):
+        gen.validate_app_ci(
+            Path("app.yaml"),
+            ["cuda"],
+            {"tests": {"cuda": [{"name": "vetnode", "kind": "cuda-vetnode", "runner": runner}]}},
+            {"cuda": "cuda"},
+        )
+
+
 def test_schema_app_accepts_explicit_custom_kind(gen):
     gen.validate_app_ci(
         Path("app.yaml"),
@@ -484,14 +507,20 @@ def test_schema_app_accepts_explicit_custom_kind(gen):
     )
 
 
-def test_schema_app_requires_base_derived_family(gen):
-    with pytest.raises(KeyError):
+@pytest.mark.parametrize("variant", ["cuda", "megatron-cuda"])
+def test_schema_app_requires_base_derived_family(gen, variant):
+    path = Path("Alps-Images/apps/example/ci.yaml")
+    with pytest.raises(RuntimeError) as error:
         gen.validate_app_ci(
-            Path("app.yaml"),
-            ["cuda"],
-            {"tests": {"cuda": [{"name": "smoke", "runner": "cuda", "script": ["true"]}]}},
+            path,
+            [variant],
+            {"tests": {variant: [{"name": "smoke", "runner": "cuda", "script": ["true"]}]}},
             {},
         )
+
+    assert str(path) in str(error.value)
+    assert variant in str(error.value)
+    assert "missing base-derived family" in str(error.value)
 
 
 @pytest.fixture()
@@ -610,13 +639,10 @@ def test_discovery_rejects_target_base_family_mismatch(gen, named_targets):
     assert wrong_base in str(error.value)
 
 
-@pytest.mark.parametrize("runner", [None, "cuda"])
-def test_discovery_rejects_cuda_vetnode_on_named_rocm_target(gen, named_targets, runner):
+def test_discovery_rejects_cuda_vetnode_on_named_rocm_target(gen, named_targets):
     app, _ = named_targets
     cfg = gen.load_yaml(app / "ci.yaml")
     test = {"name": "vetnode", "kind": "cuda-vetnode"}
-    if runner is not None:
-        test["runner"] = runner
     cfg["tests"]["megatron-rocm"] = [test]
     (app / "ci.yaml").write_text(yaml.safe_dump(cfg))
 
@@ -626,7 +652,7 @@ def test_discovery_rejects_cuda_vetnode_on_named_rocm_target(gen, named_targets,
 
 def test_cuda_vetnode_rejects_a_named_rocm_target(gen):
     app = app_image(FAMILY="rocm", VARIANT="megatron-rocm")
-    test = {"name": "vetnode", "kind": "cuda-vetnode", "runner": "cuda"}
+    test = {"name": "vetnode", "kind": "cuda-vetnode"}
 
     with pytest.raises(RuntimeError, match="requires a CUDA base"):
         gen.add_app_test(gen.Child(), app, test, [])

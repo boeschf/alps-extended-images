@@ -121,7 +121,15 @@ The generated child pipeline can contain these stages:
 
 ### App profile hash coverage
 
-`app_refs` reads the following app `profile.env` keys instead of hashing the complete profile file. `APP_VARIANTS` contains flat build targets: legacy `cuda` / `rocm`, or arbitrary family-qualified names ending in `-cuda` / `-rocm`. `<TARGET>` is the selected target uppercased with `-` replaced by `_`; for example, hypothetical `example-stage-cuda` settings use the `EXAMPLE_STAGE_CUDA` prefix. The selected base determines the accelerator family, and contradictory suffixes or colliding normalized prefixes are rejected.
+`app_refs` reads the following app `profile.env` keys instead of hashing the complete profile file.
+`APP_VARIANTS` contains flat build targets: legacy `cuda` / `rocm`, or family-qualified names ending in `-cuda` / `-rocm`.
+Target names must be lowercase and match `^[a-z_][a-z0-9_-]*$`.
+`<TARGET>` is the selected target uppercased with `-` replaced by `_`; for example, hypothetical `example-stage-cuda` settings use the `EXAMPLE_STAGE_CUDA` prefix.
+The selected base determines the accelerator family, and contradictory suffixes or colliding normalized prefixes are rejected.
+Validation covers every declared target and base selector, so a malformed unselected target or base declaration also blocks selected-target builds and ref/hash queries.
+
+`app_refs APP_NAME APP_VARIANT` returns one space-separated five-field record: `BASE_IMAGE_REF DOCKERFILE CANON_REF STABLE_REF FAMILY`.
+`FAMILY` is the selected base's accelerator family (`cuda` or `rocm`), while `BASE_IMAGE_REF` is its canonical image ref.
 
 | Profile keys | Content-hash coverage |
 | --- | --- |
@@ -134,7 +142,11 @@ The generated child pipeline can contain these stages:
 
 Source lists are whitespace-separated, app-relative files and must cover every source file copied for that target. Other logical hash inputs are the app name, selected target, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`. Containerfile, patch, test, source, copied package-helper, and `.dockerignore` contents are hashed as described above.
 
-When adding a build-affecting profile key, update its reader, hash inputs, this contract, and target-invalidation regression coverage together. Unselected target settings must not invalidate the selected image.
+When adding a build-affecting profile key, update its reader, hash inputs, this contract, and target-invalidation regression coverage together.
+Valid unselected target settings do not invalidate the selected image's content hash.
+
+App tests declared with `kind: cuda-vetnode` always use the fixed CUDA runner and accept only `name` and `kind`; they cannot set `runner` or run on ROCm bases.
+Custom app tests may still select a `runner`, defaulting to the selected base's family.
 
 ## Manual Builds
 
