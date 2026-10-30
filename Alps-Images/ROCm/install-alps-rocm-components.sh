@@ -262,6 +262,72 @@ for package in [*templates, "rocblas", "rocsolver", "miopen", "hipfft"]:
 PY
 }
 
+install_rocm_miopen_headers() {
+    local src_dir="${1:?rocm-libraries source required}"
+    local root="${2:?SDK root required}"
+    # Keep the bundled runtime; install only the pinned public C API.
+    LD_LIBRARY_PATH="${ROCM_CORE_PREFIX}/lib:${ROCM_LIBRARIES_PREFIX}/lib:${LD_LIBRARY_PATH:-}" \
+        "${ROCM_PYTHON}" - "${src_dir}/projects/miopen" "${root}" <<'MIOPENVERSION'
+import ctypes
+from pathlib import Path
+import re
+import shutil
+import sys
+
+source, root = map(Path, sys.argv[1:])
+headers = source / "include/miopen"
+# These are the complete expected public source files, not an open-ended tree.
+# Private C++ headers and new upstream files require explicit review.
+expected_files = {"miopen.h", "config.h.in", "version.h.in"}
+actual_files = {path.name for path in headers.iterdir()}
+if actual_files != expected_files or any(not (headers / name).is_file() for name in expected_files):
+    raise RuntimeError(f"Unexpected MIOpen public header layout in {headers}: expected={sorted(expected_files)}, found={sorted(actual_files)}")
+match = re.search(
+    r'rocm_setup_version\s*\(\s*VERSION\s+"?(\d+\.\d+\.\d+)',
+    (source / "CMakeLists.txt").read_text(), re.I,
+)
+if match is None:
+    raise RuntimeError("Cannot determine the pinned MIOpen public-header version")
+expected = tuple(map(int, match.group(1).split(".")))
+library_path = root / "lib/libMIOpen.so.1"
+if not library_path.is_file():
+    raise RuntimeError(f"Missing MIOpen runtime library: {library_path}")
+library = ctypes.CDLL(str(library_path))
+get_version = library.miopenGetVersion
+get_version.argtypes = [ctypes.POINTER(ctypes.c_size_t)] * 3
+get_version.restype = ctypes.c_int
+version = [ctypes.c_size_t() for _ in range(3)]
+status = get_version(*(ctypes.byref(part) for part in version))
+actual = tuple(part.value for part in version)
+if status != 0 or actual != expected:
+    raise RuntimeError(f"MIOpen header/runtime mismatch: headers={expected}, runtime={actual}, status={status}")
+destination = root / "include/miopen"
+destination.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(headers / "miopen.h", destination / "miopen.h")
+header = (headers / "version.h.in").read_text()
+for name, value in zip(("MAJOR", "MINOR", "PATCH", "TWEAK"), (*actual, 0)):
+    header = header.replace(f"@MIOpen_VERSION_{name}@", str(value))
+(destination / "version.h").write_text(header)
+# Only the public backend belongs in this consumer-only compatibility payload.
+(destination / "config.h").write_text("""#ifndef GUARD_CONFIG_H_IN
+#define GUARD_CONFIG_H_IN
+#define MIOPEN_BACKEND_HIP 1
+#define MIOPEN_MODE_NOGPU 0
+#endif
+""")
+(destination / "export.h").write_text("""#ifndef MIOPEN_EXPORT_H
+#define MIOPEN_EXPORT_H
+#define MIOPEN_EXPORT __attribute__((visibility("default")))
+#define MIOPEN_NO_EXPORT __attribute__((visibility("hidden")))
+#define MIOPEN_DEPRECATED __attribute__((__deprecated__))
+#define MIOPEN_DEPRECATED_EXPORT MIOPEN_EXPORT MIOPEN_DEPRECATED
+#define MIOPEN_DEPRECATED_NO_EXPORT MIOPEN_NO_EXPORT MIOPEN_DEPRECATED
+#endif
+""")
+print(f"Installed public MIOpen headers matching runtime {'.'.join(map(str, actual))}")
+MIOPENVERSION
+}
+
 # The wheel-only SDK layout has no devel payload: no CMake package configs, so
 # find_package() calls for a fixed set of packages (amd_comgr, rocrand, hiprand,
 # rocblas, hipblas, miopen, hipfft, hipsparse, rocprim, hipcub, rocthrust,
@@ -298,7 +364,6 @@ generate_rocm_devel_compat() {
         "projects/hipsparselt/library/include|hipsparselt"
         "projects/hipsparse/library/include|hipsparse"
         "projects/hipsolver/library/include|hipsolver"
-        "projects/miopen/include/miopen|miopen"
     )
     # Install public consumer headers, not implementation headers such as rocblas'
     # internal C++ interface. MIOpen's C API is also required by ATen/miopen headers.
@@ -391,55 +456,7 @@ HIPSPARSEEXPORT
 #endif
 HIPSOLVEREXPORT
 
-    # The wheel already supplies MIOpen. Add its pinned public C API without
-    # rebuilding/replacing that runtime or exposing MIOpen's private C++ headers.
-    # config.h records the public backend; private library build switches do not
-    # belong to this consumer-only compatibility payload.
-    rm "${root}/include/miopen/config.h.in" "${root}/include/miopen/version.h.in"
-    cat > "${root}/include/miopen/config.h" <<'MIOPENCONFIG'
-#ifndef GUARD_CONFIG_H_IN
-#define GUARD_CONFIG_H_IN
-#define MIOPEN_BACKEND_HIP 1
-#define MIOPEN_MODE_NOGPU 0
-#endif
-MIOPENCONFIG
-    cat > "${root}/include/miopen/export.h" <<'MIOPENEXPORT'
-#ifndef MIOPEN_EXPORT_H
-#define MIOPEN_EXPORT_H
-#define MIOPEN_EXPORT __attribute__((visibility("default")))
-#define MIOPEN_NO_EXPORT __attribute__((visibility("hidden")))
-#define MIOPEN_DEPRECATED __attribute__((__deprecated__))
-#define MIOPEN_DEPRECATED_EXPORT MIOPEN_EXPORT MIOPEN_DEPRECATED
-#define MIOPEN_DEPRECATED_NO_EXPORT MIOPEN_NO_EXPORT MIOPEN_DEPRECATED
-#endif
-MIOPENEXPORT
-    LD_LIBRARY_PATH="${ROCM_CORE_PREFIX}/lib:${ROCM_LIBRARIES_PREFIX}/lib:${LD_LIBRARY_PATH:-}" \
-        "${ROCM_PYTHON}" - "${src_dir}/projects/miopen" "${root}" <<'MIOPENVERSION'
-import ctypes
-from pathlib import Path
-import re
-import sys
-
-source, root = map(Path, sys.argv[1:])
-match = re.search(r"rocm_setup_version\(VERSION (\d+)\.(\d+)\.(\d+)\)", (source / "CMakeLists.txt").read_text())
-if match is None:
-    raise RuntimeError("Cannot determine the pinned MIOpen public-header version")
-expected = tuple(map(int, match.groups()))
-library = ctypes.CDLL(str(root / "lib/libMIOpen.so.1"))
-get_version = library.miopenGetVersion
-get_version.argtypes = [ctypes.POINTER(ctypes.c_size_t)] * 3
-get_version.restype = ctypes.c_int
-version = [ctypes.c_size_t() for _ in range(3)]
-status = get_version(*(ctypes.byref(part) for part in version))
-actual = tuple(part.value for part in version)
-if status != 0 or actual != expected:
-    raise RuntimeError(f"MIOpen header/runtime mismatch: headers={expected}, runtime={actual}, status={status}")
-header = (source / "include/miopen/version.h.in").read_text()
-for name, value in zip(("MAJOR", "MINOR", "PATCH", "TWEAK"), (*actual, 0)):
-    header = header.replace(f"@MIOpen_VERSION_{name}@", str(value))
-(root / "include/miopen/version.h").write_text(header)
-print(f"Installed public MIOpen headers matching runtime {'.'.join(map(str, actual))}")
-MIOPENVERSION
+    install_rocm_miopen_headers "${src_dir}" "${root}"
 
     local version_data pkg version
     local -A pkg_versions=()
@@ -1027,8 +1044,8 @@ rocm_sdk_prefix_candidates() {
 
     # Runtime discovery stays wheel-first: ldconfig must map shared sonames
     # to the same trees torch resolves via RPATH to avoid duplicate LLVM loads.
-    # Build discovery instead prefers the complete devel/compat view, even
-    # when a runtime wheel has enough HIP/HSA files to pass the minimum probes.
+    # Builds prefer an explicit devel prefix, then /opt/rocm's assembled compat
+    # view, before runtime wheels that may only satisfy the minimum HIP/HSA probes.
     for candidate in \
         "${build_devel}" \
         "${build_compat}" \

@@ -39,7 +39,7 @@ vllm_build_begin() {
         test -d "${rocm_root}" || continue
         while IFS= read -r rocm_lib_dir; do
             printf '%s\n' "${rocm_lib_dir}" >> "${rocm_ldconfig_file}"
-        done < <(find "${rocm_root}" -type f -name 'librocm-openblas.so*' -printf '%h\n' | sort -u)
+        done < <(find "${rocm_root}" -type f -name 'librocm-openblas.so*' -printf '%h\n')
     done
     # Keep wheel runtime libraries ahead of development SDK copies, as in the base.
     awk '!seen[$0]++' "${rocm_ldconfig_file}" > "${rocm_ldconfig_file}.tmp"

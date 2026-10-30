@@ -33,6 +33,7 @@ A final image check rejects dependency resolution that replaces any of those pac
 Runtime Python ignores user-site packages (`PYTHONNOUSERSITE=1`).
 Build-time package installation uses `package-helpers.sh`, which routes pip through the CSCS PyPI proxy without forcing that index on image users.
 Image labels record the pinned UCCL revision and, where applicable, the AITER revision and Model Streamer version.
+
 The ROCm app preserves the base SDK's runtime library search order when registering linker paths, while builds use the base-selected development prefix.
 
 `COMMON_PATCH_DIR=patches/common`, `CUDA_PATCH_DIR=patches/cuda`, and `ROCM_PATCH_DIR=patches/rocm` in `profile.env` are recursive hash roots, not patch-application commands.
@@ -47,7 +48,7 @@ Accelerator-specific source lists in `profile.env` keep changes to `sources/inst
 
 Each compiled-component step installs and removes newly introduced build-only APT packages in the same layer.
 This repeats package setup on cold builds but avoids retaining deleted compiler packages in lower image layers.
-Package snapshots normalize multi-arch names so inherited development packages are preserved; the CUDA base's matching RDMA headers remain available until Mooncake's explicit final purge.
+Cleanup normalizes both snapshot and requested package names to preserve inherited development packages regardless of architecture qualifiers; the CUDA base's matching RDMA headers remain available until Mooncake's explicit final purge.
 Only `libibverbs1`, not `libibverbs-dev`, is held during component cleanup.
 Base-provided Torch/Triton constraints and ROCm SDK shell state are restored for each component.
 

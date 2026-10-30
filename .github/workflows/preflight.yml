@@ -51,6 +51,9 @@ jobs:
           # use a fake skopeo executable, so no credentials or CSCS runners are needed.
           python -m py_compile ci-pipelines/helpers/generate-child-pipeline.py
           uvx --with pyyaml pytest ci-pipelines/tests
+          # The RL run collector is standard library only
+          python -m py_compile .github/rl-runs-collector/collect_rl_runs.py
+          uvx pytest .github/rl-runs-collector/tests
 
       - name: Shell syntax
         # Catch syntax errors in tracked shell scripts, including sourced helpers.
@@ -81,6 +84,14 @@ jobs:
                       for script in job.get(key) or []:
                           if isinstance(script, str):
                               subprocess.run(['bash', '-n'], input=script, text=True, check=True)
+
+          # GitHub workflows with shell steps of their own
+          for path in ['.github/workflows/collect-rl-runs.yml']:
+              data = yaml.safe_load(Path(path).read_text())
+              for job in data['jobs'].values():
+                  for step in job['steps']:
+                      if 'run' in step:
+                          subprocess.run(['bash', '-n'], input=step['run'], text=True, check=True)
           PY
 
       - name: Generated child pipeline smoke

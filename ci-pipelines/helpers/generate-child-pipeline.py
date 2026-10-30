@@ -235,7 +235,7 @@ BASE_TEST_KINDS_BY_FAMILY = {
 
 APP_TEST_KINDS = {"custom", "cuda-vetnode"}
 APP_TEST_RUNNERS = {"cuda", "rocm"}
-APP_CUDA_VETNODE_KEYS = {"name", "kind", "runner"}
+APP_CUDA_VETNODE_KEYS = {"name", "kind"}
 
 
 def require_mapping(value: Any, context: str) -> dict[str, Any]:
@@ -280,6 +280,8 @@ def validate_app_ci(
     """Validate app tests using the required base-derived family for each target."""
     tests_by_variant = require_mapping(cfg.get("tests"), f"{path}: tests")
     for variant in variants:
+        if variant not in families:
+            raise RuntimeError(f"{path}: missing base-derived family for app target {variant!r}")
         family = families[variant]
         tests = require_list(tests_by_variant.get(variant), f"{path}: tests.{variant}")
         if not tests:
@@ -292,7 +294,7 @@ def validate_app_ci(
             if kind not in APP_TEST_KINDS:
                 raise RuntimeError(f"{path}: unsupported app test kind: {kind}")
             if kind == "cuda-vetnode":
-                if family != "cuda" or str(item.get("runner", family)) != "cuda":
+                if family != "cuda":
                     raise RuntimeError(f"{path}: cuda-vetnode is only supported for cuda app tests")
                 extra_keys = set(item) - APP_CUDA_VETNODE_KEYS
                 if extra_keys:
@@ -333,8 +335,13 @@ def discover_apps() -> list[tuple[dict[str, str], list[dict[str, Any]]]]:
         variants = app_variants_from_profile(profile)
         ci_file = profile.parent / "ci.yaml"
         cfg = load_yaml(ci_file)
-        images = {variant: app_env(app, variant) for variant in variants}
-        validate_app_ci(ci_file, variants, cfg, {variant: data["FAMILY"] for variant, data in images.items()})
+        images = {}
+        families = {}
+        for variant in variants:
+            data = app_env(app, variant)
+            images[variant] = data
+            families[variant] = data["FAMILY"]
+        validate_app_ci(ci_file, variants, cfg, families)
         tests_by_variant = cfg.get("tests") or {}
         for variant in variants:
             tests = tests_by_variant.get(variant) or []
@@ -402,12 +409,12 @@ def add_app_test(child: Child, app: dict[str, str], test: dict[str, Any], needs:
     prefix = slug(f"app-{app['NAME']}-{app['VARIANT']}")
     name = f"test-{prefix}-{slug(str(test['name']))}"
     kind = str(test.get("kind", "custom"))
-    runner = str(test.get("runner", app["FAMILY"]))
     if kind == "cuda-vetnode":
         if app["FAMILY"] != "cuda":
             raise RuntimeError("cuda-vetnode requires a CUDA base image")
         child.add_job(name, ".child-cuda-app-vetnode-test-template", image=app["CANON_IMAGE_REF"], needs=needs)
         return name
+    runner = str(test.get("runner", app["FAMILY"]))
     template = ".child-rocm-custom-test-template" if runner == "rocm" else ".child-cuda-custom-test-template"
     variables = {str(k): str(v) for k, v in (test.get("variables") or {}).items()}
     child.add_job(
