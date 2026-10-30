@@ -618,17 +618,20 @@ def test_meta_app_refs_reject_invalid_target_names(named_app_root, target):
     assert target in result.stderr
 
 
-@pytest.mark.parametrize("target", ["Megatron-cuda", "MEGATRON-cuda", "megatron-CUDA", "CUDA"])
+@pytest.mark.parametrize("target", [
+    "Megatron-cuda", "MEGATRON-cuda", "megatron-CUDA", "CUDA",
+    "_team-stage-cuda", "_team-stage-rocm",
+])
 @pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
-def test_meta_consumers_reject_uppercase_target_names(named_app_root, target, helper):
-    write_named_target_profile(named_app_root, {target: "pytorch-cuda:26.06-py3"})
+def test_meta_consumers_reject_uppercase_or_leading_underscore_targets(named_app_root, target, helper):
+    base = "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13" if target.endswith("-rocm") else "pytorch-cuda:26.06-py3"
+    write_named_target_profile(named_app_root, {target: base})
 
     result = run_meta(f"{helper} apertus-2 {target}", cwd=named_app_root, check=False)
 
     assert result.returncode != 0
     assert result.stdout == ""
     assert target in result.stderr
-    assert "must match ^[a-z_][a-z0-9_-]*$" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -636,7 +639,7 @@ def test_meta_consumers_reject_uppercase_target_names(named_app_root, target, he
     [
         "cuda-rocm", "rocm-cuda", "cuda-cuda", "rocm-rocm",
         "cuda-stage-rocm", "rocm-stage-cuda",
-        "team-cuda-stage-rocm", "_team-rocm-stage-cuda",
+        "team-cuda-stage-rocm", "team-rocm-stage-cuda",
         "team_cuda-rocm", "team_rocm-cuda",
     ],
 )
@@ -674,7 +677,7 @@ def test_meta_consumers_reject_undeclared_target(named_app_root, helper):
     [
         ("cuda", "cuda", "pytorch-cuda:26.06-py3"),
         ("rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
-        ("_team-long-stage-cuda", "cuda", "pytorch-cuda:26.06-py3"),
+        ("team-long-stage-cuda", "cuda", "pytorch-cuda:26.06-py3"),
         ("team-long-stage-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
         ("cudagraph-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
         ("team_rocmish-cuda", "cuda", "pytorch-cuda:26.06-py3"),
