@@ -2,15 +2,18 @@
 
 # Alps Extended Images
 
-Container images that extend NVIDIA NGC and AMD ROCm base images with a fully-optimized HPC networking stack tailored for the [Alps supercomputer](https://www.cscs.ch/computers/alps) at [CSCS](https://www.cscs.ch). The images replace generic bundled communication components with libraries compiled specifically for the Slingshot CXI interconnect, enabling efficient GPU-accelerated collective communication across the Alps fabric.
+Container images that extend NVIDIA NGC and AMD ROCm base images with a fully-optimized HPC networking stack tailored for the [Alps supercomputer](https://www.cscs.ch/computers/alps) at [CSCS](https://www.cscs.ch).
+The images replace generic bundled communication components with libraries compiled specifically for the Slingshot CXI interconnect, enabling efficient GPU-accelerated collective communication across the Alps fabric.
 
 Image pipeline managed via: https://cicd-ext-mw.cscs.ch
 
 ## Overview
 
-Vendor GPU framework images ship with generic HPC libraries that are not optimized for the Slingshot network fabric used on Alps. This project rebuilds the relevant HPC networking stack — libfabric, NCCL/RCCL plugins, UCX, UCC, OpenMPI, and accelerator-specific components — against the CXI provider and installs the result on top of each supported base image.
+Vendor GPU framework images ship with generic HPC libraries that are not optimized for the Slingshot network fabric used on Alps.
+This project rebuilds the relevant HPC networking stack — libfabric, NCCL/RCCL plugins, UCX, UCC, OpenMPI, and accelerator-specific components — against the CXI provider and installs the result on top of each supported base image.
 
-The resulting images are validated on multi-node Slurm allocations before being promoted to stable registries. CUDA images run on Clariden GH200; ROCm images run on Beverin MI300.
+The resulting images are validated on multi-node Slurm allocations before being promoted to stable registries.
+CUDA images run on Clariden GH200; ROCm images run on Beverin MI300.
 
 ## Image Variants
 
@@ -40,7 +43,8 @@ Each variant corresponds to an AMD ROCm container extended with the Alps HPC sta
 
 ### Application Images
 
-Application images are built on top of accelerator-specific base images and include additional software for specific workloads. CUDA app variants are available for the listed workloads; ROCm app variants are added when the app explicitly opts in with its own Containerfile and tests.
+Application images are built on top of accelerator-specific base images and include additional software for specific workloads.
+CUDA app variants are available for the listed workloads; ROCm app variants are added when the app explicitly opts in with its own Containerfile and tests.
 
 | Image | Base | Description |
 |-------|------|-------------|
@@ -53,7 +57,9 @@ Application images are built on top of accelerator-specific base images and incl
 
 ## HPC Stack Components
 
-The base installers use shared defaults from `common/alps-stack-versions.env`, shared build primitives from `common/install-alps-hpc-stack.sh`, plus family-specific wrappers from `NGC/` or `ROCm/`. They purge preinstalled generic network-stack packages/files where appropriate, then build and install the following libraries. Shared primitives export `LIBFABRIC_PREFIX`, `UCX_PREFIX`, `UCC_PREFIX`, `OMPI_PREFIX`, and `HWLOC_PREFIX`; shared aws-ofi plugin logic is configured by the family wrappers with CUDA or ROCm support.
+The base installers use shared defaults from `common/alps-stack-versions.env`, shared build primitives from `common/install-alps-hpc-stack.sh`, plus family-specific wrappers from `NGC/` or `ROCm/`.
+They purge preinstalled generic network-stack packages/files where appropriate, then build and install the following libraries.
+Shared primitives export `LIBFABRIC_PREFIX`, `UCX_PREFIX`, `UCC_PREFIX`, `OMPI_PREFIX`, and `HWLOC_PREFIX`; shared aws-ofi plugin logic is configured by the family wrappers with CUDA or ROCm support.
 
 | Component | Version | Purpose |
 |-----------|---------|---------|
@@ -69,21 +75,34 @@ The base installers use shared defaults from `common/alps-stack-versions.env`, s
 | NCCL Tests | 2.18.2 | Collective benchmark suite |
 | OSU Micro-benchmarks | 7.5.2 | Point-to-point latency and bandwidth measurements |
 
-CUDA components are compiled with CUDA support and architecture-specific flags for NVIDIA Hopper (SM90/SM90a). ROCm components keep the bundled RCCL by default, build aws-ofi-rccl against the Alps libfabric stack, and build rccl-tests for the profile's selected targets: ROCm 7.14 retains MI250/MI300 (`gfx90a`, `gfx942`); the ROCm 10.0 profile targets MI300 (`gfx942`). ROCm 10.0 image coverage for `gfx90a` is not established. RCCL rebuilds are opt-in with `ROCM_REBUILD_RCCL=1`.
+CUDA components are compiled with CUDA support and architecture-specific flags for NVIDIA Hopper (SM90/SM90a).
+ROCm components keep the bundled RCCL by default, build aws-ofi-rccl against the Alps libfabric stack, and build rccl-tests for the profile's selected targets: ROCm 7.14 retains MI250/MI300 (`gfx90a`, `gfx942`); the ROCm 10.0 profile targets MI300 (`gfx942`).
+ROCm 10.0 image coverage for `gfx90a` is not established.
+RCCL rebuilds are opt-in with `ROCM_REBUILD_RCCL=1`.
 
-The ROCm 10.0 base ships only runtime SDK wheels (there is no public `rocm-sdk-devel` for ROCm 10), so its profile pins the matching `rocm-libraries` source tag (`ROCM_LIBRARIES_REPO`/`ROCM_LIBRARIES_COMMIT`) and the build generates the missing devel payload from it: CMake package configs for every package torch's `LoadHIP` requires, the public math-library headers, and dev-name library symlinks, mirrored at both `/opt/rocm` and the wheel install prefix. ROCm 7.x profiles use the real `rocm-sdk-devel` wheel instead and need no such pin.
+The ROCm 10.0 base ships only runtime SDK wheels (there is no public `rocm-sdk-devel` for ROCm 10), so its profile pins the matching `rocm-libraries` source tag (`ROCM_LIBRARIES_REPO`/`ROCM_LIBRARIES_COMMIT`) and the build generates the missing devel payload from it: CMake package configs for every package torch's `LoadHIP` requires, the public math-library headers, and dev-name library symlinks, mirrored at both `/opt/rocm` and the wheel install prefix.
+ROCm 7.x profiles use the real `rocm-sdk-devel` wheel instead and need no such pin.
 
-RCCL builds and `rccl-tests` share SDK compiler discovery: prefer `${ROCM_SDK_BIN}/amdclang++`, falling back to `${ROCM_CORE_PREFIX}/lib/llvm/bin/clang++` for wheel-only layouts. The test build passes that compiler explicitly to CMake instead of relying on the upstream toolchain's conventional `ROCM_PATH/llvm/bin/amdclang++` path.
+RCCL builds and `rccl-tests` share SDK compiler discovery: prefer `${ROCM_SDK_BIN}/amdclang++`, falling back to `${ROCM_CORE_PREFIX}/lib/llvm/bin/clang++` for wheel-only layouts.
+The test build passes that compiler explicitly to CMake instead of relying on the upstream toolchain's conventional `ROCM_PATH/llvm/bin/amdclang++` path.
 
-The wheel-only layout exposes the SDK's real `lib/llvm/amdgcn` payload through both `/opt/rocm/amdgcn` and `${ROCM_CORE_PREFIX}/amdgcn`. The latter is necessary when `ROCM_PATH` explicitly selects the core wheel prefix: clang then searches that prefix for HIP device bitcode rather than falling back to `/opt/rocm`. Missing `ocml.bc` or `ockl.bc` stops bootstrap with an explicit error; device-library linking is not disabled.
+The wheel-only layout exposes the SDK's real `lib/llvm/amdgcn` payload through both `/opt/rocm/amdgcn` and `${ROCM_CORE_PREFIX}/amdgcn`.
+The latter is necessary when `ROCM_PATH` explicitly selects the core wheel prefix: clang then searches that prefix for HIP device bitcode rather than falling back to `/opt/rocm`.
+Missing `ocml.bc` or `ockl.bc` stops bootstrap with an explicit error; device-library linking is not disabled.
 
-SDK distributions, including device wheels, must match the profile's ROCm base release; matching nightly/development builds are retained. Profiles without pinned compatibility sources install the real devel wheel when it is absent and fail if installation fails. Compatibility builds shallow-fetch the pinned sources and derive component versions from their upstream CMake declarations and header templates rather than assigning SDK versions to every library. They refuse to replace an existing `/opt/rocm` directory or symlink unless it is an installer-owned compatibility tree. ROCm 10-specific rccl-tests compiler workarounds do not modify ROCm 7.14 sources.
+SDK distributions, including device wheels, must match the profile's ROCm base release; matching nightly/development builds are retained.
+Profiles without pinned compatibility sources install the real devel wheel when it is absent and fail if installation fails.
+Compatibility builds shallow-fetch the pinned sources and derive component versions from their upstream CMake declarations and header templates rather than assigning SDK versions to every library.
+They refuse to replace an existing `/opt/rocm` directory or symlink unless it is an installer-owned compatibility tree.
+ROCm 10-specific rccl-tests compiler workarounds do not modify ROCm 7.14 sources.
 
-Patches for upstream issues in libfabric, NCCL, and aws-ofi-nccl are maintained under `Alps-Images/patches/` and are included in base image hashes. Application-specific patches are kept under `Alps-Images/apps/<app>/patches/` and are included in app image hashes.
+Patches for upstream issues in libfabric, NCCL, and aws-ofi-nccl are maintained under `Alps-Images/patches/` and are included in base image hashes.
+Application-specific patches are kept under `Alps-Images/apps/<app>/patches/` and are included in app image hashes.
 
 ## Runtime Environment
 
-Runtime environment fragments configure Slingshot-based collective communication. NGC images assemble `common/alps-runtime.common.env`, `common/alps-runtime.nccl-like.env`, and `NGC/alps-runtime.cuda.env`; ROCm images assemble `common/alps-runtime.common.env`, `common/alps-runtime.nccl-like.env`, and `ROCm/alps-runtime.rocm.env` into `/opt/alps/env/alps-runtime.env`:
+Runtime environment fragments configure Slingshot-based collective communication.
+NGC images assemble `common/alps-runtime.common.env`, `common/alps-runtime.nccl-like.env`, and `NGC/alps-runtime.cuda.env`; ROCm images assemble `common/alps-runtime.common.env`, `common/alps-runtime.nccl-like.env`, and `ROCm/alps-runtime.rocm.env` into `/opt/alps/env/alps-runtime.env`:
 
 - **NCCL/RCCL-compatible defaults**: uses the AWS libfabric transport (`NCCL_NET=AWS Libfabric`) and Slingshot-oriented NIC/socket/protocol/channel tuning
 - **NCCL/CUDA-specific defaults**: NVIDIA topology/GDR tuning and CUDA/NVSHMEM settings
@@ -93,11 +112,19 @@ Runtime environment fragments configure Slingshot-based collective communication
 - **OpenMPI / PMIX**: security modules, byte transfer layer restricted to supported backends
 - **CUDA**: JIT cache disabled for shared-filesystem compatibility
 
+Both shipped ROCm profiles default `NCCL_P2P_DISABLE=1` in Podman and Sarus/Enroot; the earlier runtime-specific exception was removed because the Sarus results were inconclusive.
+Explicit user values, including an empty value, remain unchanged.
+
 ## CI/CD Pipeline
 
-The GitLab entry point is `ci-pipelines/build-alps-extended-images.yaml`. It generates a child pipeline at runtime because the required work depends on registry state: missing canonical images are built, images without a current tested marker are validated, and validated images with stale or missing stable refs are published. If all images are current, the child pipeline contains only a lightweight `no-work-required` job.
+The GitLab entry point is `ci-pipelines/build-alps-extended-images.yaml`.
+It generates a child pipeline at runtime because the required work depends on registry state: missing canonical images are built, images without a current tested marker are validated, and validated images with stale or missing stable refs are published.
+If all images are current, the child pipeline contains only a lightweight `no-work-required` job.
 
-Canonical build jobs use project-wide resource-group locks keyed by a SHA-256 hash of the full canonical image reference (registry, repository, and tag). Identical references share a lock across PRs and pipelines; different canonical images can build concurrently, including different versions of the same variant. After acquiring the lock, each job re-checks the registry and skips its build if another pipeline has already published that image. Digest mismatches remain hard failures.
+Canonical build jobs use project-wide resource-group locks keyed by a SHA-256 hash of the full canonical image reference (registry, repository, and tag).
+Identical references share a lock across PRs and pipelines; different canonical images can build concurrently, including different versions of the same variant.
+After acquiring the lock, each job re-checks the registry and skips its build if another pipeline has already published that image.
+Digest mismatches remain hard failures.
 
 The generated child pipeline can contain these stages:
 
@@ -109,19 +136,29 @@ The generated child pipeline can contain these stages:
 6. **mark-app-tested** — creates tested-marker tags for app images that passed the current validation
 7. **publish** — promotes validated images to stable JFrog and GHCR refs while preserving stable-tag immutability rules
 
-**Image tagging strategy:** canonical image tags include deterministic content hashes, allowing the pipeline to detect unchanged inputs and skip unnecessary rebuilds. App hashes include the accelerator variant, canonical base image ref, selected Containerfile and profile values, declared tests and patches, source files, and copied shared helpers. Base hashes include the selected family/profile, shared stack inputs, and the complete shared patch tree recursively, so new patch directories are covered automatically. The root `.dockerignore` policy is also hashed. Tested-marker tags have the form `<canonical-tag>-tested-<validation-hash>` and are valid only when they point to the same digest as the canonical image.
+**Image tagging strategy:** canonical image tags include deterministic content hashes, allowing the pipeline to detect unchanged inputs and skip unnecessary rebuilds.
+App hashes include the accelerator variant, canonical base image ref, selected Containerfile and profile values, declared tests and patches, source files, and copied shared helpers.
+Base hashes include the selected family/profile, shared stack inputs, and the complete shared patch tree recursively, so new patch directories are covered automatically.
+The root `.dockerignore` policy is also hashed.
+Tested-marker tags have the form `<canonical-tag>-tested-<validation-hash>` and are valid only when they point to the same digest as the canonical image.
 
 **Build-cache policy:**
 
-- OCI timestamps and commit metadata are applied after software installation in every base and app image. A final no-op `RUN` makes metadata changes visible to Podman's label cache without rerunning expensive builds. The generator image has only static labels.
+- OCI timestamps and commit metadata are applied after software installation in every base and app image.
+  A final no-op `RUN` makes metadata changes visible to Podman's label cache without rerunning expensive builds.
+  The generator image has only static labels.
 - App profile hashes use only the selected accelerator's settings; see [App profile hash coverage](#app-profile-hash-coverage) for supported keys and source-file defaults.
-- The repository-root `.dockerignore` excludes Git metadata, Python caches, and editor scratch files without restricting source directories. These transient files are also excluded from recursive content hashing.
-- Base patch changes can invalidate both accelerator families' canonical refs. Component-specific `COPY` instructions still allow unaffected build layers to be reused.
-- Changing a canonical base or an earlier installed component still invalidates dependent layers. Containerfile and hash-policy changes require a one-time canonical-image rebuild; timestamps and commit SHAs remain excluded from content hashes.
+- The repository-root `.dockerignore` excludes Git metadata, Python caches, and editor scratch files without restricting source directories.
+  These transient files are also excluded from recursive content hashing.
+- Base patch changes can invalidate both accelerator families' canonical refs.
+  Component-specific `COPY` instructions still allow unaffected build layers to be reused.
+- Changing a canonical base or an earlier installed component still invalidates dependent layers.
+  Containerfile and hash-policy changes require a one-time canonical-image rebuild; timestamps and commit SHAs remain excluded from content hashes.
 
 ### App profile hash coverage
 
-`app_refs` reads the following app `profile.env` keys instead of hashing the complete profile file. `<VARIANT>` is the selected accelerator in uppercase, such as `CUDA` or `ROCM`.
+`app_refs` reads the following app `profile.env` keys instead of hashing the complete profile file.
+`<VARIANT>` is the selected accelerator in uppercase, such as `CUDA` or `ROCM`.
 
 | Profile keys | Content-hash coverage |
 | --- | --- |
@@ -132,14 +169,19 @@ The generated child pipeline can contain these stages:
 | `COMMON_SOURCE_FILES`, `<VARIANT>_SOURCE_FILES` | Both selected lists and file contents; if both lists are empty, an existing `sources/` directory is hashed recursively. |
 | `APP_VARIANTS` | Validates variant eligibility; the full list is not hashed, but the selected variant is. |
 
-Source lists are whitespace-separated, app-relative files and must cover every source file copied for that variant. Other logical hash inputs are the app name, selected variant, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`. Containerfile, patch, test, source, copied package-helper, and `.dockerignore` contents are hashed as described above.
+Source lists are whitespace-separated, app-relative files and must cover every source file copied for that variant.
+Other logical hash inputs are the app name, selected variant, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`.
+Containerfile, patch, test, source, copied package-helper, and `.dockerignore` contents are hashed as described above.
 
-When adding a build-affecting profile key, update its reader, hash inputs, this contract, and accelerator-invalidation regression coverage together. Unselected accelerator settings must not invalidate the selected image.
+When adding a build-affecting profile key, update its reader, hash inputs, this contract, and accelerator-invalidation regression coverage together.
+Unselected accelerator settings must not invalidate the selected image.
 
 ## Manual Builds
 
-Images can be built manually on Alps with `podman` using generated build scripts that reuse the CI image-reference logic. See `manual-build/README.md`.
+Images can be built manually on Alps with `podman` using generated build scripts that reuse the CI image-reference logic.
+See `manual-build/README.md`.
 
 ## Acknowledgements
 
-Alps extended base images have been developed in collaboration with the Swiss AI engineers. Special thanks to [@EduardDurech](https://github.com/EduardDurech) for the many contributions ranging from discovering bottlenecks and major bugs to patching underlying libraries.
+Alps extended base images have been developed in collaboration with the Swiss AI engineers.
+Special thanks to [@EduardDurech](https://github.com/EduardDurech) for the many contributions ranging from discovering bottlenecks and major bugs to patching underlying libraries.
