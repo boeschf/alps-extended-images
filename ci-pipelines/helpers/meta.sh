@@ -505,8 +505,8 @@ app_variants_from_profile() {
   local -A prefixes=()
 
   for declared_variant in $app_variants; do
-    [[ "$declared_variant" =~ ^[a-z_][a-z0-9_-]*$ ]] || {
-      echo "ERROR: app target '${declared_variant}' in ${profile_file} must match ^[a-z_][a-z0-9_-]*$" >&2
+    [[ "$declared_variant" =~ ^[a-z][a-z0-9]*((_|__|-+)[a-z0-9]+)*$ ]] || {
+      echo "ERROR: app target '${declared_variant}' in ${profile_file} must match ^[a-z][a-z0-9]*((_|__|-+)[a-z0-9]+)*$" >&2
       return 1
     }
     case "$declared_variant" in

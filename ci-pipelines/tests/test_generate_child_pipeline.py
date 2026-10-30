@@ -175,21 +175,27 @@ def test_app_variants_rejects_invalid_target_name(gen, tmp_path, target):
     assert target in str(error.value)
 
 
-@pytest.mark.parametrize("target", ["Megatron-cuda", "MEGATRON-cuda", "megatron-CUDA", "CUDA"])
-def test_app_variants_rejects_uppercase_target_names(gen, tmp_path, target):
+@pytest.mark.parametrize("target", [
+    "Megatron-cuda", "MEGATRON-cuda", "megatron-CUDA", "CUDA",
+    "_team-stage-cuda", "_team-stage-rocm",
+    "a_-cuda", "a-_stage-cuda", "a___stage-cuda",
+    "a_-stage-rocm", "a--_stage-rocm",
+])
+def test_app_variants_rejects_invalid_target_syntax(gen, tmp_path, target):
     profile = tmp_path / "profile.env"
-    profile.write_text(f'APP_VARIANTS="{target}"\n')
+    prefix = target.upper().replace("-", "_")
+    family = "rocm" if target.endswith("-rocm") else "cuda"
+    profile.write_text(f'APP_VARIANTS="{target}"\n{prefix}_BASE_IMAGE=pytorch-{family}:test\n')
 
     with pytest.raises(RuntimeError) as error:
         gen.app_variants_from_profile(profile)
 
     assert target in str(error.value)
-    assert "must match ^[a-z_][a-z0-9_-]*$" in str(error.value)
 
 
 def test_app_variants_accepts_family_only_and_multi_part_targets(gen, tmp_path):
     profile = tmp_path / "profile.env"
-    variants = ["cuda", "rocm", "_team-long-stage-cuda", "team-long-stage-rocm"]
+    variants = ["cuda", "rocm", "team-long-stage-cuda", "team-long-stage-rocm", "team__stage-cuda", "team--stage-rocm"]
     lines = [f'APP_VARIANTS="{" ".join(variants)}"']
     for target in variants:
         prefix = target.upper().replace("-", "_")
