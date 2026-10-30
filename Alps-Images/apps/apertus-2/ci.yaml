@@ -2,7 +2,6 @@ tests:
   megatron-base-cuda:
     - name: vetnode
       kind: cuda-vetnode
-      runner: cuda
 
     - name: stack-smoke
       runner: cuda
@@ -26,7 +25,6 @@ tests:
   megatron-cuda:
     - name: vetnode
       kind: cuda-vetnode
-      runner: cuda
 
     - name: stack-smoke
       runner: cuda
