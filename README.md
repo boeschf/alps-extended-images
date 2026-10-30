@@ -124,6 +124,7 @@ The generated child pipeline can contain these stages:
 `app_refs` reads the following app `profile.env` keys instead of hashing the complete profile file.
 `APP_VARIANTS` contains flat build targets: legacy `cuda` / `rocm`, or family-qualified names ending in `-cuda` / `-rocm`.
 Target names must be lowercase and match `^[a-z_][a-z0-9_-]*$`.
+In qualified targets, `cuda` and `rocm` are reserved for the final family suffix and cannot appear as hyphen- or underscore-delimited components in the variant name; for example, `cuda-rocm`, `rocm-cuda`, and `team_cuda-rocm` are rejected.
 `<TARGET>` is the selected target uppercased with `-` replaced by `_`; for example, hypothetical `example-stage-cuda` settings use the `EXAMPLE_STAGE_CUDA` prefix.
 The selected base determines the accelerator family, and contradictory suffixes or colliding normalized prefixes are rejected.
 Validation covers every declared target and base selector, so a malformed unselected target or base declaration also blocks selected-target builds and ref/hash queries.

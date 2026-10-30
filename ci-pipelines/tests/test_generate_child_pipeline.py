@@ -151,7 +151,11 @@ def test_app_variants_rejects_missing_or_empty_target_list(gen, tmp_path, profil
 )
 def test_app_variants_rejects_profile_prefix_collisions(gen, tmp_path, variants):
     profile = tmp_path / "profile.env"
-    profile.write_text(f'APP_VARIANTS="{variants}"\n')
+    lines = [f'APP_VARIANTS="{variants}"']
+    for target in dict.fromkeys(variants.split()):
+        prefix = target.upper().replace("-", "_")
+        lines.append(f"{prefix}_BASE_IMAGE=pytorch-cuda:test")
+    profile.write_text("\n".join(lines) + "\n")
 
     with pytest.raises(RuntimeError, match="share profile prefix"):
         gen.app_variants_from_profile(profile)
@@ -185,7 +189,7 @@ def test_app_variants_rejects_uppercase_target_names(gen, tmp_path, target):
 
 def test_app_variants_accepts_family_only_and_multi_part_targets(gen, tmp_path):
     profile = tmp_path / "profile.env"
-    variants = ["cuda", "rocm", "_team-rocm-stage-cuda", "team-cuda-stage-rocm"]
+    variants = ["cuda", "rocm", "_team-long-stage-cuda", "team-long-stage-rocm"]
     lines = [f'APP_VARIANTS="{" ".join(variants)}"']
     for target in variants:
         prefix = target.upper().replace("-", "_")

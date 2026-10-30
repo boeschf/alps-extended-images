@@ -335,8 +335,13 @@ def discover_apps() -> list[tuple[dict[str, str], list[dict[str, Any]]]]:
         variants = app_variants_from_profile(profile)
         ci_file = profile.parent / "ci.yaml"
         cfg = load_yaml(ci_file)
-        images = {variant: app_env(app, variant) for variant in variants}
-        validate_app_ci(ci_file, variants, cfg, {variant: data["FAMILY"] for variant, data in images.items()})
+        images = {}
+        families = {}
+        for variant in variants:
+            data = app_env(app, variant)
+            images[variant] = data
+            families[variant] = data["FAMILY"]
+        validate_app_ci(ci_file, variants, cfg, families)
         tests_by_variant = cfg.get("tests") or {}
         for variant in variants:
             tests = tests_by_variant.get(variant) or []

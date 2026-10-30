@@ -593,8 +593,11 @@ def test_meta_named_targets_use_the_selected_base(named_app_root):
 )
 @pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
 def test_meta_rejects_colliding_target_prefixes(named_app_root, variants, helper):
+    write_named_target_profile(named_app_root, dict.fromkeys(variants.split(), "pytorch-cuda:26.06-py3"))
     profile = named_app_root / "Alps-Images/apps/apertus-2/profile.env"
-    profile.write_text(f'APP_VARIANTS="{variants}"\n')
+    lines = profile.read_text().splitlines()
+    lines[0] = f'APP_VARIANTS="{variants}"'
+    profile.write_text("\n".join(lines) + "\n")
 
     result = run_meta(f"{helper} apertus-2 {variants.split()[0]}", cwd=named_app_root, check=False)
 
@@ -628,6 +631,33 @@ def test_meta_consumers_reject_uppercase_target_names(named_app_root, target, he
     assert "must match ^[a-z_][a-z0-9_-]*$" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        "cuda-rocm", "rocm-cuda", "cuda-cuda", "rocm-rocm",
+        "cuda-stage-rocm", "rocm-stage-cuda",
+        "team-cuda-stage-rocm", "_team-rocm-stage-cuda",
+        "team_cuda-rocm", "team_rocm-cuda",
+    ],
+)
+@pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
+def test_meta_consumers_reject_family_tokens_in_unselected_variant_names(named_app_root, target, helper):
+    family = target.rsplit("-", 1)[-1]
+    base = "pytorch-cuda:26.06-py3" if family == "cuda" else "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"
+    write_named_target_profile(
+        named_app_root,
+        {"megatron-cuda": "pytorch-cuda:26.06-py3", target: base},
+    )
+
+    result = run_meta(f"{helper} apertus-2 megatron-cuda", cwd=named_app_root, check=False)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert target in result.stderr
+    assert "must not contain cuda or rocm variant components" in result.stderr
+
+
+
 @pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
 def test_meta_consumers_reject_undeclared_target(named_app_root, helper):
     write_named_target_profile(named_app_root, {"megatron-cuda": "pytorch-cuda:26.06-py3"})
@@ -644,8 +674,10 @@ def test_meta_consumers_reject_undeclared_target(named_app_root, helper):
     [
         ("cuda", "cuda", "pytorch-cuda:26.06-py3"),
         ("rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
-        ("_team-rocm-stage-cuda", "cuda", "pytorch-cuda:26.06-py3"),
-        ("team-cuda-stage-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("_team-long-stage-cuda", "cuda", "pytorch-cuda:26.06-py3"),
+        ("team-long-stage-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("cudagraph-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("team_rocmish-cuda", "cuda", "pytorch-cuda:26.06-py3"),
     ],
 )
 def test_meta_build_env_accepts_family_only_and_multi_part_targets(named_app_root, target, family, base):
@@ -666,9 +698,9 @@ def test_meta_build_env_accepts_family_only_and_multi_part_targets(named_app_roo
 @pytest.mark.parametrize(
     "helper,target,base",
     [
-        ("app_refs", "cuda-stage-rocm", "pytorch-cuda:26.06-py3"),
+        ("app_refs", "stage-rocm", "pytorch-cuda:26.06-py3"),
         ("app_refs", "cuda", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
-        ("app_validation_hash", "rocm-stage-cuda", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
+        ("app_validation_hash", "stage-cuda", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
         ("app_validation_hash", "rocm", "pytorch-cuda:26.06-py3"),
     ],
 )

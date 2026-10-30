@@ -40,6 +40,7 @@ For app images, the generated script uses the canonical base image reference com
 
 App `APP_VARIANTS` entries are flat build targets: `cuda` / `rocm` for family-only apps, otherwise `<variant>-cuda` / `<variant>-rocm`.
 Target names must be lowercase and match `^[a-z_][a-z0-9_-]*$`.
+In qualified targets, `cuda` and `rocm` are reserved for the final suffix and cannot appear as hyphen- or underscore-delimited variant components.
 The selected `<TARGET>_BASE_IMAGE` determines the family, and a contradictory target suffix is an error.
 Profile-key prefixes uppercase the target and replace `-` with `_`.
 For example, a hypothetical `app example megatron-cuda` selector would use `MEGATRON_CUDA_BASE_IMAGE` and image name `example-megatron-cuda`; this illustrates the convention, not an available image.

@@ -494,7 +494,7 @@ app_base_family() {
 app_variants_from_profile() {
   local profile_file="${1:?profile file required}"
   local requested_variant="${2:-}"
-  local app_variants declared_variant prefix
+  local app_variants declared_variant prefix base_image family variant_name
   [[ -f "$profile_file" ]] || { echo "ERROR: missing $profile_file" >&2; return 1; }
   app_variants="$(profile_value "$profile_file" APP_VARIANTS)" || return 1
   [[ -n "${app_variants//[[:space:]]/}" ]] || {
@@ -515,17 +515,18 @@ app_variants_from_profile() {
         return 1
         ;;
     esac
+    variant_name="${declared_variant%-*}"
+    if [[ "$declared_variant" != cuda && "$declared_variant" != rocm &&
+          "$variant_name" =~ (^|[-_])(cuda|rocm)([-_]|$) ]]; then
+      echo "ERROR: app target '${declared_variant}' in ${profile_file} must not contain cuda or rocm variant components before its family suffix" >&2
+      return 1
+    fi
     prefix="$(app_variant_prefix "$declared_variant")" || return 1
     if [[ -n "${prefixes[$prefix]+set}" ]]; then
       echo "ERROR: app variants '${prefixes[$prefix]}' and '${declared_variant}' share profile prefix ${prefix} in ${profile_file}" >&2
       return 1
     fi
     prefixes[$prefix]="$declared_variant"
-  done
-
-  local base_image family
-  for declared_variant in $app_variants; do
-    prefix="$(app_variant_prefix "$declared_variant")" || return 1
     base_image="$(profile_value "$profile_file" "${prefix}_BASE_IMAGE")" || return 1
     [[ -n "$base_image" ]] || {
       echo "ERROR: ${prefix}_BASE_IMAGE must be set in ${profile_file}" >&2
@@ -726,8 +727,8 @@ app_refs() {
   # Compute canonical ref of base
   local base_family base_name base_variant
   read -r base_family base_name base_variant < <(parse_base_image "$base_image")
-  local family="$base_family"
-  [[ "$family" != ngc ]] || family=cuda
+  local family
+  family="$(app_base_family "$base_image")" || return 1
   local base_canon_ref
   base_canon_ref="$(base_canonical_ref "$base_family" "$base_name" "$base_variant")"
 

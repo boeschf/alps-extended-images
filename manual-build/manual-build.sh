@@ -156,12 +156,13 @@ EOF
 emit_app_script() {
   local app_name="${1:?app_name required}"
   local app_variant="${2:?app_variant required}"
-  local root image_description family
+  local root image_description
   root="$(repo_root)"
 
   source "$root/ci-pipelines/helpers/skopeo.sh"
   source "$root/ci-pipelines/helpers/meta.sh"
-  read -r BASE_IMAGE_REF DOCKERFILE CANON_IMAGE_REF STABLE_IMAGE_REF family < <(app_refs "$app_name" "$app_variant")
+  # Discard the fifth field (family) without folding it into STABLE_IMAGE_REF.
+  read -r BASE_IMAGE_REF DOCKERFILE CANON_IMAGE_REF STABLE_IMAGE_REF _ < <(app_refs "$app_name" "$app_variant")
   image_description="This image extends ${BASE_IMAGE_REF} with application software for Alps."
 
   cat <<EOF
