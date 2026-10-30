@@ -1,4 +1,4 @@
-image = "jfrog.svc.cscs.ch/docker-group-csstaff/alps-images/apertus-2-megatron-cuda:alps7-dev-5f46d3cbf16e0fe48da85b44d076e850"
+image = "jfrog.svc.cscs.ch/docker-group-csstaff/alps-images/apertus-2-megatron-cuda:alps7-dev-51b1a1ccf8d648c18d7adb3bda8e5d3b"
 
 mounts = ["/capstor/", "/ritom/", "/iopsstor"]
 

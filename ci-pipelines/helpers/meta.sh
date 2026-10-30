@@ -175,7 +175,6 @@ app_validation_hash() {
   test_dir_rel="$(profile_value "$profile_file" "$test_dir_var")"
   patch_dir_rel="$(profile_value "$profile_file" "$patch_dir_var")"
 
-
   if [[ -n "$common_test_dir" ]]; then
     paths+=("${app_dir}/${common_test_dir}")
   fi
@@ -491,10 +490,12 @@ app_base_family() {
 
 # Read and validate all targets without executing the profile. Optionally require
 # one requested target to be declared before callers normalize its name.
+# Validation is profile-wide: malformed unselected targets or base declarations
+# also block builds and ref/hash queries for an otherwise valid selected target.
 app_variants_from_profile() {
   local profile_file="${1:?profile file required}"
   local requested_variant="${2:-}"
-  local app_variants declared_variant prefix
+  local app_variants declared_variant prefix base_image family variant_name
   [[ -f "$profile_file" ]] || { echo "ERROR: missing $profile_file" >&2; return 1; }
   app_variants="$(profile_value "$profile_file" APP_VARIANTS)" || return 1
   [[ -n "${app_variants//[[:space:]]/}" ]] || {
@@ -504,8 +505,8 @@ app_variants_from_profile() {
   local -A prefixes=()
 
   for declared_variant in $app_variants; do
-    [[ "$declared_variant" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || {
-      echo "ERROR: app target '${declared_variant}' in ${profile_file} must match [A-Za-z_][A-Za-z0-9_-]*" >&2
+    [[ "$declared_variant" =~ ^[a-z][a-z0-9]*((_|__|-+)[a-z0-9]+)*$ ]] || {
+      echo "ERROR: app target '${declared_variant}' in ${profile_file} must match ^[a-z][a-z0-9]*((_|__|-+)[a-z0-9]+)*$" >&2
       return 1
     }
     case "$declared_variant" in
@@ -515,17 +516,18 @@ app_variants_from_profile() {
         return 1
         ;;
     esac
+    variant_name="${declared_variant%-*}"
+    if [[ "$declared_variant" != cuda && "$declared_variant" != rocm &&
+          "$variant_name" =~ (^|[-_])(cuda|rocm)([-_]|$) ]]; then
+      echo "ERROR: app target '${declared_variant}' in ${profile_file} must not contain cuda or rocm variant components before its family suffix" >&2
+      return 1
+    fi
     prefix="$(app_variant_prefix "$declared_variant")" || return 1
     if [[ -n "${prefixes[$prefix]+set}" ]]; then
       echo "ERROR: app variants '${prefixes[$prefix]}' and '${declared_variant}' share profile prefix ${prefix} in ${profile_file}" >&2
       return 1
     fi
     prefixes[$prefix]="$declared_variant"
-  done
-
-  local base_image family
-  for declared_variant in $app_variants; do
-    prefix="$(app_variant_prefix "$declared_variant")" || return 1
     base_image="$(profile_value "$profile_file" "${prefix}_BASE_IMAGE")" || return 1
     [[ -n "$base_image" ]] || {
       echo "ERROR: ${prefix}_BASE_IMAGE must be set in ${profile_file}" >&2
@@ -629,21 +631,14 @@ write_app_build_env() {
   local app_name="${2:?app name required}"
   local app_variant="${3:?app variant required}"
   local base_image_ref dockerfile canon_image_ref stable_image_ref tested_image_ref image_description validation_hash_value
-  local selected_base family variant_prefix
+  local family
 
   : "${GHCR_IMAGE_PREFIX:?GHCR_IMAGE_PREFIX must be set}"
   : "${CI_COMMIT_SHORT_SHA:?CI_COMMIT_SHORT_SHA must be set}"
 
   # App canonical hashes include the canonical base ref, so app images rebuild
   # automatically when their selected base content changes.
-  read -r base_image_ref dockerfile canon_image_ref stable_image_ref < <(app_refs "$app_name" "$app_variant") || return 1
-  variant_prefix="$(app_variant_prefix "$app_variant")"
-  selected_base="$(
-    profile_value \
-      "Alps-Images/apps/${app_name}/profile.env" \
-      "${variant_prefix}_BASE_IMAGE"
-  )"
-  family="$(app_base_family "$selected_base")" || return 1
+  read -r base_image_ref dockerfile canon_image_ref stable_image_ref family < <(app_refs "$app_name" "$app_variant") || return 1
 
   validation_hash_value="$(app_validation_hash "$app_name" "$app_variant")" || return 1
   tested_image_ref="$(tested_ref_for "$canon_image_ref" "$validation_hash_value")"
@@ -668,7 +663,8 @@ EOF
 
 # Usage: app_refs APP_NAME APP_VARIANT
 # Returns a space-separated record:
-#   BASE_IMAGE_REF DOCKERFILE CANON_REF STABLE_REF
+#   BASE_IMAGE_REF DOCKERFILE CANON_REF STABLE_REF FAMILY
+# FAMILY is the selected base's accelerator family: cuda (NGC) or rocm.
 app_refs() {
   local app_name="${1:?name required}"       # e.g. vllm
   local app_variant="${2:?app variant required}" # e.g. cuda
@@ -733,6 +729,8 @@ app_refs() {
   # Compute canonical ref of base
   local base_family base_name base_variant
   read -r base_family base_name base_variant < <(parse_base_image "$base_image")
+  local family
+  family="$(app_base_family "$base_image")" || return 1
   local base_canon_ref
   base_canon_ref="$(base_canonical_ref "$base_family" "$base_name" "$base_variant")"
 
@@ -767,5 +765,5 @@ app_refs() {
   local canon_ref stable_ref
   read -r canon_ref stable_ref < <(image_refs "$image_name" "$tag" "$h")
 
-  printf '%s %s %s %s\n' "$base_canon_ref" "$dockerfile" "$canon_ref" "$stable_ref"
+  printf '%s %s %s %s %s\n' "$base_canon_ref" "$dockerfile" "$canon_ref" "$stable_ref" "$family"
 }
