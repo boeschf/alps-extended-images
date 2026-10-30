@@ -147,7 +147,7 @@ Tested-marker tags have the form `<canonical-tag>-tested-<validation-hash>` and 
 - OCI timestamps and commit metadata are applied after software installation in every base and app image.
   A final no-op `RUN` makes metadata changes visible to Podman's label cache without rerunning expensive builds.
   The generator image has only static labels.
-- App profile hashes use only the selected accelerator's settings; see [App profile hash coverage](#app-profile-hash-coverage) for supported keys and source-file defaults.
+- App profile hashes use only the selected build target's settings; see [App profile hash coverage](#app-profile-hash-coverage) for supported keys and source-file defaults.
 - The repository-root `.dockerignore` excludes Git metadata, Python caches, and editor scratch files without restricting source directories.
   These transient files are also excluded from recursive content hashing.
 - Base patch changes can invalidate both accelerator families' canonical refs.
@@ -158,23 +158,34 @@ Tested-marker tags have the form `<canonical-tag>-tested-<validation-hash>` and 
 ### App profile hash coverage
 
 `app_refs` reads the following app `profile.env` keys instead of hashing the complete profile file.
-`<VARIANT>` is the selected accelerator in uppercase, such as `CUDA` or `ROCM`.
+`APP_VARIANTS` contains flat build targets: legacy `cuda` / `rocm`, or family-qualified names ending in `-cuda` / `-rocm`.
+Target names must be lowercase and match `^[a-z_][a-z0-9_-]*$`.
+In qualified targets, `cuda` and `rocm` are reserved for the final family suffix and cannot appear as hyphen- or underscore-delimited components in the variant name; for example, `cuda-rocm`, `rocm-cuda`, and `team_cuda-rocm` are rejected.
+`<TARGET>` is the selected target uppercased with `-` replaced by `_`; for example, hypothetical `example-stage-cuda` settings use the `EXAMPLE_STAGE_CUDA` prefix.
+The selected base determines the accelerator family, and contradictory suffixes or colliding normalized prefixes are rejected.
+Validation covers every declared target and base selector, so a malformed unselected target or base declaration also blocks selected-target builds and ref/hash queries.
+
+`app_refs APP_NAME APP_VARIANT` returns one space-separated five-field record: `BASE_IMAGE_REF DOCKERFILE CANON_REF STABLE_REF FAMILY`.
+`FAMILY` is the selected base's accelerator family (`cuda` or `rocm`), while `BASE_IMAGE_REF` is its canonical image ref.
 
 | Profile keys | Content-hash coverage |
 | --- | --- |
-| `<VARIANT>_BASE_IMAGE` | Resolved canonical base ref; the raw selector is not hashed separately. |
-| `COMMON_CONTAINERFILE`, `<VARIANT>_CONTAINERFILE` | Effective selected path and file contents; variant override, then common value, then `Containerfile`. |
-| `COMMON_TEST_DIR`, `<VARIANT>_TEST_DIR` | Both declared paths and their recursive contents. |
-| `COMMON_PATCH_DIR`, `<VARIANT>_PATCH_DIR` | Both declared paths and their recursive contents. |
-| `COMMON_SOURCE_FILES`, `<VARIANT>_SOURCE_FILES` | Both selected lists and file contents; if both lists are empty, an existing `sources/` directory is hashed recursively. |
-| `APP_VARIANTS` | Validates variant eligibility; the full list is not hashed, but the selected variant is. |
+| `<TARGET>_BASE_IMAGE` | Resolved canonical base ref; the raw selector is not hashed separately. |
+| `COMMON_CONTAINERFILE`, `<TARGET>_CONTAINERFILE` | Effective selected path and file contents; target override, then common value, then `Containerfile`. |
+| `COMMON_TEST_DIR`, `<TARGET>_TEST_DIR` | Both declared paths and their recursive contents. |
+| `COMMON_PATCH_DIR`, `<TARGET>_PATCH_DIR` | Both declared paths and their recursive contents. |
+| `COMMON_SOURCE_FILES`, `<TARGET>_SOURCE_FILES` | Both selected lists and file contents; if both lists are empty, an existing `sources/` directory is hashed recursively. |
+| `APP_VARIANTS` | Validates target eligibility and base-family agreement; the full list is not hashed, but the selected target is. |
 
-Source lists are whitespace-separated, app-relative files and must cover every source file copied for that variant.
-Other logical hash inputs are the app name, selected variant, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`.
+Source lists are whitespace-separated, app-relative files and must cover every source file copied for that target.
+Other logical hash inputs are the app name, selected target, derived image name, `ALPS_REV`, and `CSCS_CI_ORIG_CLONE_URL`.
 Containerfile, patch, test, source, copied package-helper, and `.dockerignore` contents are hashed as described above.
 
-When adding a build-affecting profile key, update its reader, hash inputs, this contract, and accelerator-invalidation regression coverage together.
-Unselected accelerator settings must not invalidate the selected image.
+When adding a build-affecting profile key, update its reader, hash inputs, this contract, and target-invalidation regression coverage together.
+Valid unselected target settings do not invalidate the selected image's content hash.
+
+App tests declared with `kind: cuda-vetnode` always use the fixed CUDA runner and accept only `name` and `kind`; they cannot set `runner` or run on ROCm bases.
+Custom app tests may still select a `runner`, defaulting to the selected base's family.
 
 ## Manual Builds
 
