@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -257,6 +258,29 @@ def test_meta_base_refs_return_expected_fields():
     rocm_fields = run_meta("rocm_base_refs pytorch rocm7.14-ubuntu24.04-py3.12-torch2.11").stdout.split()
     assert len(ngc_fields) == 5
     assert len(rocm_fields) == 4
+
+
+@pytest.mark.parametrize("helper", ["rocm_base_refs pytorch", "write_base_build_env"])
+def test_rocm_base_helpers_preserve_optional_library_variable_scope(tmp_path, helper):
+    variant = "rocm7.14-ubuntu24.04-py3.12-torch2.11"
+    output = tmp_path / "base.env"
+    command = (
+        f"rocm_base_refs pytorch {variant}"
+        if helper == "rocm_base_refs pytorch"
+        else f"write_base_build_env {output} rocm pytorch {variant}"
+    )
+    result = run_meta(
+        f'{command} && printf "\\nLIBRARY_SCOPE=%s,%s\\n" "$ROCM_LIBRARIES_REPO" "$ROCM_LIBRARIES_COMMIT"',
+        ROCM_LIBRARIES_REPO="outer-repo",
+        ROCM_LIBRARIES_COMMIT="outer-commit",
+    )
+
+    assert result.stdout.splitlines()[-1] == "LIBRARY_SCOPE=outer-repo,outer-commit"
+    if output.exists():
+        data = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        profile = f"Alps-Images/ROCm/pytorch-{variant}/profile.env"
+        for key in ("ROCM_LIBRARIES_REPO", "ROCM_LIBRARIES_COMMIT"):
+            assert data[key] == run_meta(f"profile_value {profile} {key}").stdout.strip()
 
 
 @pytest.mark.parametrize(
@@ -998,12 +1022,179 @@ def test_rocm_sdk_source_pins_explicitly_allow_missing_devel(tmp_path):
     assert "devel=no" in result.stdout
 
 
-def test_rocm_build_prefix_order_does_not_change_runtime_order():
-    env = {"ROCM_CORE_PREFIX": "/wheel/core", "ROCM_LIBRARIES_PREFIX": "/wheel/libraries", "ROCM_DEVEL_PREFIX": "/wheel/devel"}
-    runtime = run_bash(source_rocm("rocm_sdk_prefix_candidates"), env=env).stdout.splitlines()
-    build = run_bash(source_rocm("rocm_sdk_prefix_candidates build"), env=env).stdout.splitlines()
-    assert runtime[:3] == ["/wheel/core", "/wheel/libraries", "/opt/rocm"]
-    assert build[:4] == ["/wheel/core", "/wheel/libraries", "/wheel/devel", "/opt/rocm"]
+@pytest.fixture
+def miopen_headers_runtime(tmp_path):
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("C compiler required for the MIOpen runtime ABI fixture")
+    source = tmp_path / "sources"
+    project = source / "projects/miopen"
+    headers = project / "include/miopen"
+    headers.mkdir(parents=True)
+    (project / "CMakeLists.txt").write_text("rocm_setup_version(VERSION 3.6.0)\n")
+    (headers / "miopen.h").write_text("/* public C API */\n")
+    (headers / "config.h.in").write_text("/* upstream build configuration */\n")
+    (headers / "version.h.in").write_text("".join(
+        f"#define MIOPEN_VERSION_{name} @MIOpen_VERSION_{name}@\n"
+        for name in ("MAJOR", "MINOR", "PATCH", "TWEAK")
+    ))
+    sdk = tmp_path / "sdk"
+    (sdk / "lib").mkdir(parents=True)
+    runtime = tmp_path / "miopen.c"
+    runtime.write_text(
+        "#include <stddef.h>\n"
+        "int miopenGetVersion(size_t *major, size_t *minor, size_t *patch) {\n"
+        "    *major = 3; *minor = 6; *patch = 0; return 0;\n"
+        "}\n"
+    )
+    subprocess.run([compiler, "-shared", "-fPIC", str(runtime), "-o", str(sdk / "lib/libMIOpen.so.1")], check=True)
+    env = {"SOURCE": str(source), "SDK": str(sdk), "ROCM_PYTHON": sys.executable,
+           "ROCM_CORE_PREFIX": str(sdk), "ROCM_LIBRARIES_PREFIX": str(sdk)}
+    return project, sdk, env
+
+
+@pytest.mark.parametrize("declaration", [
+    "rocm_setup_version(VERSION 3.6.0)",
+    'rocm_setup_version ( VERSION "3.6.0" )',
+    'ROCM_SETUP_VERSION(\\n\\tVERSION\\t"3.6.0"\\n)',
+])
+def test_miopen_public_headers_accept_cmake_version_layouts(miopen_headers_runtime, declaration):
+    project, sdk, env = miopen_headers_runtime
+    (project / "CMakeLists.txt").write_text(declaration.replace("\\n", "\n").replace("\\t", "\t") + "\n")
+    run_bash(source_rocm('install_rocm_miopen_headers "$SOURCE" "$SDK"'), env=env)
+    headers = sdk / "include/miopen"
+    assert {path.name for path in headers.iterdir()} == {"miopen.h", "config.h", "export.h", "version.h"}
+    version = (headers / "version.h").read_text()
+    assert "#define MIOPEN_VERSION_MAJOR 3\n" in version
+    assert "#define MIOPEN_VERSION_MINOR 6\n" in version
+    assert "@" not in version
+
+
+@pytest.mark.parametrize("failure", ["missing-runtime", "version-mismatch", "private-header", "private-directory"])
+def test_miopen_public_headers_refuse_invalid_payloads(miopen_headers_runtime, failure):
+    project, sdk, env = miopen_headers_runtime
+    if failure == "missing-runtime":
+        (sdk / "lib/libMIOpen.so.1").unlink()
+    elif failure == "version-mismatch":
+        (project / "CMakeLists.txt").write_text('rocm_setup_version ( VERSION "3.7.0" )\n')
+    elif failure == "private-header":
+        (project / "include/miopen/internal.hpp").write_text("/* private */\n")
+    else:
+        (project / "include/miopen/internal").mkdir()
+    result = run_bash(source_rocm('install_rocm_miopen_headers "$SOURCE" "$SDK"'), env=env, check=False)
+    assert result.returncode != 0
+    assert not (sdk / "include/miopen").exists()
+    if failure == "missing-runtime":
+        assert str(sdk / "lib/libMIOpen.so.1") in result.stderr
+        assert "OSError" not in result.stderr
+    elif failure == "version-mismatch":
+        assert "(3, 7, 0)" in result.stderr and "(3, 6, 0)" in result.stderr
+    else:
+        assert ("internal.hpp" if failure == "private-header" else "internal") in result.stderr
+
+
+def test_rocm_build_prefix_uses_development_view_without_reordering_runtime_libraries(tmp_path):
+    core = tmp_path / "core"
+    libraries = tmp_path / "libraries"
+    devel = tmp_path / "devel"
+    # A runtime tree may have enough HIP/HSA files to pass the discovery
+    # probes, but extension builds still need the complete development view.
+    for prefix in (core, devel):
+        for header in (
+            "hip/hip_runtime_api.h", "hip/hip_runtime.h", "hip/hip_version.h",
+            "hsa/hsa.h", "hsa/hsa_ext_amd.h",
+        ):
+            path = prefix / "include" / header
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("/* public header */\n")
+        (prefix / "lib").mkdir()
+        for name in ("libamdhip64.so", "libhsa-runtime64.so", "libhsakmt.so"):
+            (prefix / "lib" / name).write_text("runtime")
+    (libraries / "lib").mkdir(parents=True)
+    (libraries / "lib" / "librccl.so").write_text("runtime")
+    env = {
+        "ROCM_CORE_PREFIX": str(core),
+        "ROCM_LIBRARIES_PREFIX": str(libraries),
+        "ROCM_DEVEL_PREFIX": str(devel),
+        "ROCM_CORE_DIR": str(core),
+        "ROCM_LIBRARIES_DIR": str(libraries),
+        "ROCM_DEVEL_DIR": str(devel),
+        "ROCM_SDK_ROOT": str(devel),
+        "ROCM_SDK_BIN": str(devel / "bin"),
+        "ROCM_SDK_CMAKE": str(devel / "lib/cmake"),
+        "ROCM_PYTHON": sys.executable,
+        "ROCM_SDK": str(devel / "bin/rocm-sdk"),
+    }
+    selected = run_bash(source_rocm("discover_rocm_build_prefix"), env=env)
+    assert Path(selected.stdout.strip()) == devel
+    runtime_dirs = run_bash(source_rocm("rocm_sdk_ldconfig_dirs"), env=env).stdout.splitlines()
+    assert runtime_dirs.index(str(core / "lib")) < runtime_dirs.index(str(devel / "lib"))
+    assert runtime_dirs.index(str(libraries / "lib")) < runtime_dirs.index(str(devel / "lib"))
+    # Simulate bootstrap's selection, persist it, then load it in a fresh shell.
+    alps_env = tmp_path / "env"
+    component = tmp_path / "components.sh"
+    component.write_text(
+        (ROOT / "Alps-Images/ROCm/install-alps-rocm-components.sh").read_text()
+        .replace("/opt/alps/env", str(alps_env))
+    )
+    run_bash(
+        f'set -eu; source "{component}"; '
+        'ROCM_BUILD_PREFIX="$(discover_rocm_build_prefix)"; persist_rocm_sdk_env',
+        env=env,
+    )
+    loaded = run_bash(
+        f'set -eu; source "{component}"; unset ROCM_BUILD_PREFIX; load_rocm_sdk_env; '
+        'printf "%s\\n" "$ROCM_BUILD_PREFIX" "$ROCM_HOME" "$ROCM_PATH" "$HIP_PATH"',
+        env=env,
+    )
+    assert loaded.stdout.splitlines() == [str(devel)] * 4
+
+
+def test_vllm_rocm_build_setup_preserves_runtime_linker_order(tmp_path):
+    core = tmp_path / "z-core"
+    libraries = tmp_path / "zz-libraries"
+    devel = tmp_path / "a-devel"
+    for prefix in (core, libraries, devel):
+        (prefix / "lib").mkdir(parents=True)
+        runtime = "libamdhip64.so.7" if prefix == core else "librccl.so.1"
+        (prefix / "lib" / runtime).write_text("runtime")
+        (prefix / "blas").mkdir()
+        (prefix / "blas" / "librocm-openblas.so.0").write_text("openblas")
+    alps = tmp_path / "alps"
+    (alps / "env").mkdir(parents=True)
+    (alps / "env" / "alps-rocm-build.env").write_text(
+        f"export ROCM_CORE_PREFIX={core}\n"
+        f"export ROCM_LIBRARIES_PREFIX={libraries}\n"
+        f"export ROCM_DEVEL_PREFIX={devel}\n"
+        f"export ROCM_BUILD_PREFIX={devel}\n"
+    )
+    (alps / "package-helpers.sh").write_text(
+        'snapshot_apt_packages() { printf "inherited:amd64\\n" > "$1"; }\n'
+        "apt_get() { :; }\n"
+    )
+    (alps / "install-alps-hpc-stack.sh").write_text("")
+    (alps / "install-alps-rocm-components.sh").write_text(
+        (ROOT / "Alps-Images/ROCm/install-alps-rocm-components.sh").read_text()
+        .replace("/opt/rocm", str(tmp_path / "compat"))
+    )
+    ldconfig = tmp_path / "ldconfig"
+    ldconfig.mkdir()
+    # Relocate container filesystem paths only; execute the real setup and SDK
+    # discovery functions, with package installation isolated from the host.
+    helper = tmp_path / "build-rocm-env.sh"
+    helper.write_text(
+        (ROOT / "Alps-Images/apps/vllm/sources/build-rocm-env.sh").read_text()
+        .replace("/opt/alps", str(alps))
+        .replace("/etc/ld.so.conf.d", str(ldconfig))
+        .replace("/tmp/vllm-apt-before.txt", str(tmp_path / "apt-before.txt"))
+        .replace("/var/lib/apt/lists", str(tmp_path / "apt-lists"))
+    )
+    run_bash(f'set -euo pipefail; source "{helper}"; vllm_build_begin')
+    runtime_dirs = (ldconfig / "99-alps-vllm-rocm-sdk.conf").read_text().splitlines()
+    assert runtime_dirs == [
+        str(core / "lib"), str(libraries / "lib"), str(devel / "lib"),
+        str(core / "blas"), str(libraries / "blas"), str(devel / "blas"),
+    ]
 
 
 def test_rocm_714_rccl_test_sources_remain_unchanged(tmp_path):

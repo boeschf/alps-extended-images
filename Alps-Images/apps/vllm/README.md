@@ -34,6 +34,8 @@ Runtime Python ignores user-site packages (`PYTHONNOUSERSITE=1`).
 Build-time package installation uses `package-helpers.sh`, which routes pip through the CSCS PyPI proxy without forcing that index on image users.
 Image labels record the pinned UCCL revision and, where applicable, the AITER revision and Model Streamer version.
 
+The ROCm app preserves the base SDK's runtime library search order when registering linker paths, while builds use the base-selected development prefix.
+
 `COMMON_PATCH_DIR=patches/common`, `CUDA_PATCH_DIR=patches/cuda`, and `ROCM_PATCH_DIR=patches/rocm` in `profile.env` are recursive hash roots, not patch-application commands.
 Component subdirectories (`aiter`, `mooncake`, `uccl`, and `vllm`) separate patches for different source trees; the Containerfiles copy the relevant component sets, applying common patches before accelerator-specific patches.
 AITER patches live under `patches/rocm/aiter/` and are applied before building the ROCm image's AITER wheel and core module.

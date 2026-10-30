@@ -388,6 +388,7 @@ rocm_base_refs() {
 
   local ROCM_VERSION ROCM_PYPI_INDEX_URL ROCM_REBUILD_RCCL
   local ROCM_SYSTEMS_REPO ROCM_SYSTEMS_COMMIT RCCL_GPU_TARGETS RCCL_TESTS_GPU_TARGETS
+  local ROCM_LIBRARIES_REPO ROCM_LIBRARIES_COMMIT
   load_rocm_profile "$profile_file"
   ROCM_VERSION="$(rocm_version_from_variant "$rocm_variant")"
   local base_image_ref
@@ -577,6 +578,7 @@ write_base_build_env() {
       read -r base_image_ref dockerfile canon_image_ref stable_image_ref < <(rocm_base_refs "$name" "$variant")
       local profile_file ROCM_VERSION ROCM_PYPI_INDEX_URL ROCM_REBUILD_RCCL
       local ROCM_SYSTEMS_REPO ROCM_SYSTEMS_COMMIT RCCL_GPU_TARGETS RCCL_TESTS_GPU_TARGETS
+      local ROCM_LIBRARIES_REPO ROCM_LIBRARIES_COMMIT
       profile_file="$(rocm_profile_file "$name" "$variant")"
       load_rocm_profile "$profile_file"
       ROCM_VERSION="$(rocm_version_from_variant "$variant")"
