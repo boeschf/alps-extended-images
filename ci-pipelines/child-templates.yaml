@@ -251,7 +251,7 @@ include:
       fi
     - echo "[image-vet] diagnose"
     - source "$venv/bin/activate"
-    - vetnode diagnose "$config"
+    - NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET vetnode diagnose --verbose "$config"
   variables:
     SLURM_JOB_NUM_NODES: 4
     SLURM_NTASKS: 16
