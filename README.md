@@ -159,7 +159,8 @@ Tested-marker tags have the form `<canonical-tag>-tested-<validation-hash>` and 
 
 `app_refs` reads the following app `profile.env` keys instead of hashing the complete profile file.
 `APP_VARIANTS` contains flat build targets: legacy `cuda` / `rocm`, or family-qualified names ending in `-cuda` / `-rocm`.
-Target names must start with a lowercase letter and match `^[a-z][a-z0-9_-]*$`.
+Target names must start with a lowercase letter and match `^[a-z][a-z0-9]*((_|__|-+)[a-z0-9]+)*$`.
+Separators must occur between lowercase alphanumeric groups: one or two underscores, or one or more hyphens; mixed adjacent separators such as `a_-cuda` are rejected.
 In qualified targets, `cuda` and `rocm` are reserved for the final family suffix and cannot appear as hyphen- or underscore-delimited components in the variant name; for example, `cuda-rocm`, `rocm-cuda`, and `team_cuda-rocm` are rejected.
 `<TARGET>` is the selected target uppercased with `-` replaced by `_`; for example, hypothetical `example-stage-cuda` settings use the `EXAMPLE_STAGE_CUDA` prefix.
 The selected base determines the accelerator family, and contradictory suffixes or colliding normalized prefixes are rejected.

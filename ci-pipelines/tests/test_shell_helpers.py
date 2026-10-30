@@ -621,9 +621,11 @@ def test_meta_app_refs_reject_invalid_target_names(named_app_root, target):
 @pytest.mark.parametrize("target", [
     "Megatron-cuda", "MEGATRON-cuda", "megatron-CUDA", "CUDA",
     "_team-stage-cuda", "_team-stage-rocm",
+    "a_-cuda", "a-_stage-cuda", "a___stage-cuda",
+    "a_-stage-rocm", "a--_stage-rocm",
 ])
 @pytest.mark.parametrize("helper", ["app_refs", "app_validation_hash"])
-def test_meta_consumers_reject_uppercase_or_leading_underscore_targets(named_app_root, target, helper):
+def test_meta_consumers_reject_invalid_target_syntax(named_app_root, target, helper):
     base = "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13" if target.endswith("-rocm") else "pytorch-cuda:26.06-py3"
     write_named_target_profile(named_app_root, {target: base})
 
@@ -681,6 +683,8 @@ def test_meta_consumers_reject_undeclared_target(named_app_root, helper):
         ("team-long-stage-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
         ("cudagraph-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
         ("team_rocmish-cuda", "cuda", "pytorch-cuda:26.06-py3"),
+        ("team__stage-cuda", "cuda", "pytorch-cuda:26.06-py3"),
+        ("team--stage-rocm", "rocm", "pytorch-rocm:rocm10.0-ubuntu24.04-py3.12-torch2.13"),
     ],
 )
 def test_meta_build_env_accepts_family_only_and_multi_part_targets(named_app_root, target, family, base):

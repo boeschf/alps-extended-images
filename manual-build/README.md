@@ -42,7 +42,8 @@ For app images, the generated script uses the canonical base image reference com
 If you built that base locally first, keep the default `IMAGE_PREFIX` consistent so the app build can find the local base tag.
 
 App `APP_VARIANTS` entries are flat build targets: `cuda` / `rocm` for family-only apps, otherwise `<variant>-cuda` / `<variant>-rocm`.
-Target names must start with a lowercase letter and match `^[a-z][a-z0-9_-]*$`.
+Target names must start with a lowercase letter and match `^[a-z][a-z0-9]*((_|__|-+)[a-z0-9]+)*$`.
+Separators must occur between lowercase alphanumeric groups: one or two underscores, or one or more hyphens; mixed adjacent separators such as `a_-cuda` are rejected.
 In qualified targets, `cuda` and `rocm` are reserved for the final suffix and cannot appear as hyphen- or underscore-delimited variant components.
 The selected `<TARGET>_BASE_IMAGE` determines the family, and a contradictory target suffix is an error.
 Profile-key prefixes uppercase the target and replace `-` with `_`.
