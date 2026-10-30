@@ -306,6 +306,8 @@ include:
           sys.exit(1)
       print(torch.cuda.get_device_name(0), flush=True)
       # Call MIOpen explicitly: a generic convolution could select another backend.
+      # Private ATen schema used by the Torch 2.11 (ROCm 7.14) and 2.13 (ROCm 10)
+      # profiles; review the positional arguments when upgrading either profile.
       torch.manual_seed(0)
       x = torch.randn(2, 3, 16, 16)
       weight = torch.randn(5, 3, 3, 3) * 0.1
@@ -321,6 +323,8 @@ include:
     - |
       set -euo pipefail
       source /opt/alps/env/alps-rocm-build.env
+      : "${ROCM_BUILD_PREFIX:?ROCM_BUILD_PREFIX missing from alps-rocm-build.env}"
+      : "${ROCM_CORE_PREFIX:?ROCM_CORE_PREFIX missing from alps-rocm-build.env}"
       work="$(mktemp -d)"
       trap 'rm -rf "$work"' EXIT
       cat > "$work/miopen.cpp" <<'CPP'
@@ -329,16 +333,27 @@ include:
       #include <cstdio>
       int main() {
           size_t major = 0, minor = 0, patch = 0;
-          if (miopenGetVersion(&major, &minor, &patch) != miopenStatusSuccess)
+          if (miopenGetVersion(&major, &minor, &patch) != miopenStatusSuccess) {
+              std::fprintf(stderr, "MIOpen validation failed: miopenGetVersion\n");
               return 1;
+          }
           if (major != MIOPEN_VERSION_MAJOR || minor != MIOPEN_VERSION_MINOR ||
-              patch != MIOPEN_VERSION_PATCH)
+              patch != MIOPEN_VERSION_PATCH) {
+              std::fprintf(stderr, "MIOpen validation failed: header/runtime version mismatch "
+                           "(headers=%d.%d.%d, runtime=%zu.%zu.%zu)\n",
+                           MIOPEN_VERSION_MAJOR, MIOPEN_VERSION_MINOR, MIOPEN_VERSION_PATCH,
+                           major, minor, patch);
               return 2;
+          }
           miopenHandle_t handle = nullptr;
-          if (miopenCreate(&handle) != miopenStatusSuccess)
+          if (miopenCreate(&handle) != miopenStatusSuccess) {
+              std::fprintf(stderr, "MIOpen validation failed: miopenCreate\n");
               return 3;
-          if (miopenDestroy(handle) != miopenStatusSuccess)
+          }
+          if (miopenDestroy(handle) != miopenStatusSuccess) {
+              std::fprintf(stderr, "MIOpen validation failed: miopenDestroy\n");
               return 4;
+          }
           std::printf("MIOpen headers/runtime agree: %zu.%zu.%zu; GPU handle created\n",
                       major, minor, patch);
       }
